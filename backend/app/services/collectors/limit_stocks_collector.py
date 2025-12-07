@@ -15,6 +15,7 @@ from typing import Optional, List, Dict
 from loguru import logger
 
 from app.utils.supabase_client import get_supabase
+from app.utils.trading_date import get_latest_trading_date
 
 
 class LimitStocksCollector:
@@ -296,13 +297,13 @@ class LimitStocksCollector:
         采集并保存涨跌停股池数据
 
         Args:
-            trade_date: 交易日期 YYYY-MM-DD，默认为今天
+            trade_date: 交易日期 YYYY-MM-DD，默认为最近交易日
 
         Returns:
             {"limit_up": count, "limit_down": count}
         """
         if not trade_date:
-            trade_date = datetime.now().strftime("%Y-%m-%d")
+            trade_date = get_latest_trading_date()  # 使用最近交易日而不是系统当前日期
 
         date_akshare = trade_date.replace("-", "")
 

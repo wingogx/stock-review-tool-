@@ -3,10 +3,11 @@
 使用 AKShare 采集市场情绪相关数据：涨跌比、涨停数、连板分布、炸板率等
 
 数据来源:
-- stock_zh_a_spot_em: A股实时行情数据（用于统计涨跌家数）
+- stock_market_activity_legu: 乐咕乐股-市场异动（用于统计涨跌家数）✅ 稳定
+- stock_sse_deal_daily: 上交所-每日概览（用于统计上交所成交额）✅ 稳定
+- stock_szse_summary: 深交所-市场总貌（用于统计深交所成交额）✅ 稳定
 - stock_zt_pool_em: 涨停股池数据（真实涨停数据）
 - stock_zt_pool_dtgc_em: 跌停股池数据
-- stock_zt_pool_previous_em: 昨日涨停股池（用于计算连板）
 """
 
 import akshare as ak
@@ -17,6 +18,7 @@ from loguru import logger
 import json
 
 from app.utils.supabase_client import get_supabase
+from app.utils.trading_date import get_latest_trading_date
 
 
 class MarketSentimentCollector:
@@ -25,27 +27,80 @@ class MarketSentimentCollector:
     def __init__(self):
         self.supabase = get_supabase()
 
-    def collect_stock_spot_data(self) -> pd.DataFrame:
+    def collect_market_activity_data(self) -> Dict:
         """
-        采集 A 股实时行情数据（用于统计涨跌家数）
+        采集市场异动数据（用于统计涨跌家数）
+        使用乐咕乐股-市场异动接口（稳定可靠）
 
         Returns:
-            DataFrame with all A-share stocks realtime data
+            市场异动数据字典
         """
         try:
-            logger.info("采集 A 股实时行情数据...")
-            df = ak.stock_zh_a_spot_em()
+            logger.info("采集市场异动数据...")
+            df = ak.stock_market_activity_legu()
 
             if df is None or df.empty:
-                logger.warning("A 股实时行情数据为空")
-                return pd.DataFrame()
+                logger.warning("市场异动数据为空")
+                return {}
 
-            logger.info(f"成功采集 A 股实时行情，共 {len(df)} 只股票")
-            return df
+            # 将数据转换为字典
+            data_dict = dict(zip(df['item'], df['value']))
+
+            logger.info(f"成功采集市场异动数据: 上涨{data_dict.get('上涨', 0)}, 下跌{data_dict.get('下跌', 0)}")
+            return data_dict
 
         except Exception as e:
-            logger.error(f"采集 A 股实时行情失败: {str(e)}")
-            return pd.DataFrame()
+            logger.error(f"采集市场异动数据失败: {str(e)}")
+            return {}
+
+    def collect_total_amount(self, date: str) -> float:
+        """
+        采集两市总成交额（上交所 + 深交所）
+
+        Args:
+            date: 日期 YYYYMMDD
+
+        Returns:
+            总成交额（元）
+        """
+        try:
+            total_amount = 0.0
+
+            # 1. 获取上交所成交额
+            try:
+                sse_df = ak.stock_sse_deal_daily(date=date)
+                if not sse_df.empty:
+                    amount_row = sse_df[sse_df['单日情况'] == '成交金额']
+                    if not amount_row.empty:
+                        sse_amount_yi = float(amount_row['股票'].iloc[0])
+                        sse_amount = sse_amount_yi * 1e8  # 转换为元
+                        total_amount += sse_amount
+                        logger.debug(f"上交所成交额: {sse_amount_yi:.2f} 亿元")
+            except Exception as e:
+                logger.warning(f"获取上交所成交额失败: {e}")
+
+            # 2. 获取深交所成交额
+            try:
+                szse_df = ak.stock_szse_summary(date=date)
+                if not szse_df.empty:
+                    stock_row = szse_df[szse_df['证券类别'] == '股票']
+                    if not stock_row.empty:
+                        szse_amount = float(stock_row['成交金额'].iloc[0])  # 单位：元
+                        total_amount += szse_amount
+                        logger.debug(f"深交所成交额: {szse_amount / 1e8:.2f} 亿元")
+            except Exception as e:
+                logger.warning(f"获取深交所成交额失败: {e}")
+
+            if total_amount > 0:
+                logger.info(f"两市总成交额: {total_amount / 1e8:.2f} 亿元")
+            else:
+                logger.warning("未能获取两市成交额数据")
+
+            return total_amount
+
+        except Exception as e:
+            logger.error(f"采集两市总成交额失败: {str(e)}")
+            return 0.0
 
     def collect_limit_up_pool(self, date: Optional[str] = None) -> pd.DataFrame:
         """
@@ -101,32 +156,6 @@ class MarketSentimentCollector:
             logger.error(f"采集跌停股池失败: {str(e)}")
             return pd.DataFrame()
 
-    def collect_continuous_limit_up(self, date: Optional[str] = None) -> pd.DataFrame:
-        """
-        采集连板股数据（真实数据）
-
-        Args:
-            date: 日期 YYYYMMDD
-
-        Returns:
-            DataFrame with continuous limit-up stocks
-        """
-        try:
-            logger.info("采集连板股数据...")
-
-            # 使用昨日涨停股池（包含连板天数信息）
-            df = ak.stock_zt_pool_previous_em(date=date or datetime.now().strftime("%Y%m%d"))
-
-            if df is None or df.empty:
-                logger.warning("连板股数据为空")
-                return pd.DataFrame()
-
-            logger.info(f"成功采集连板股数据，共 {len(df)} 只")
-            return df
-
-        except Exception as e:
-            logger.error(f"采集连板股数据失败: {str(e)}")
-            return pd.DataFrame()
 
     def calculate_continuous_distribution(self, limit_up_df: pd.DataFrame) -> Dict[str, int]:
         """
@@ -233,53 +262,46 @@ class MarketSentimentCollector:
         采集完整的市场情绪数据
 
         Args:
-            trade_date: 交易日期 YYYY-MM-DD，默认为今天
+            trade_date: 交易日期 YYYY-MM-DD，默认为最近交易日
 
         Returns:
             市场情绪数据字典
         """
         if not trade_date:
-            trade_date = datetime.now().strftime("%Y-%m-%d")
+            trade_date = get_latest_trading_date()  # 使用最近交易日而不是系统当前日期
 
         date_akshare = trade_date.replace("-", "")
 
         logger.info(f"开始采集 {trade_date} 市场情绪数据...")
 
-        # 1. 采集实时行情（统计涨跌家数）
-        spot_df = self.collect_stock_spot_data()
+        # 1. 采集市场异动数据（涨跌家数）
+        market_activity = self.collect_market_activity_data()
 
-        # 2. 采集涨停股池
+        # 2. 采集两市总成交额
+        total_amount = self.collect_total_amount(date_akshare)
+
+        # 3. 采集涨停股池
         limit_up_df = self.collect_limit_up_pool(date_akshare)
 
-        # 3. 采集跌停股池
+        # 4. 采集跌停股池
         limit_down_df = self.collect_limit_down_pool(date_akshare)
 
-        # 4. 统计涨跌家数
-        up_count = 0
-        down_count = 0
-        flat_count = 0
-        total_amount = 0.0
-
-        if not spot_df.empty and '涨跌幅' in spot_df.columns:
-            up_count = (spot_df['涨跌幅'] > 0).sum()
-            down_count = (spot_df['涨跌幅'] < 0).sum()
-            flat_count = (spot_df['涨跌幅'] == 0).sum()
-
-            # 统计总成交额
-            if '成交额' in spot_df.columns:
-                total_amount = spot_df['成交额'].sum()
+        # 5. 从市场异动数据中提取涨跌家数
+        up_count = int(market_activity.get('上涨', 0))
+        down_count = int(market_activity.get('下跌', 0))
+        flat_count = int(market_activity.get('平盘', 0))
 
         # 计算涨跌比
         up_down_ratio = (up_count / down_count) if down_count > 0 else 0.0
 
-        # 5. 统计涨跌停数量
+        # 6. 统计涨跌停数量
         limit_up_count = len(limit_up_df)
         limit_down_count = len(limit_down_df)
 
-        # 6. 计算连板分布
+        # 7. 计算连板分布
         continuous_distribution = self.calculate_continuous_distribution(limit_up_df)
 
-        # 7. 计算炸板率
+        # 8. 计算炸板率
         exploded_count, explosion_rate = self.calculate_explosion_rate(limit_up_df)
 
         sentiment_data = {
@@ -296,7 +318,7 @@ class MarketSentimentCollector:
             "explosion_rate": round(explosion_rate, 4),
         }
 
-        logger.info(f"市场情绪数据采集完成: 涨{up_count}/跌{down_count}, 涨停{limit_up_count}/跌停{limit_down_count}, 炸板率{explosion_rate:.2f}%")
+        logger.info(f"市场情绪数据采集完成: 涨{up_count}/跌{down_count}, 涨停{limit_up_count}/跌停{limit_down_count}, 总成交额{total_amount/1e8:.2f}亿, 炸板率{explosion_rate:.2f}%")
 
         return sentiment_data
 
