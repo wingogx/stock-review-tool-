@@ -1,0 +1,48 @@
+# ============================================
+# 股市复盘工具 - Python 依赖包
+# ============================================
+
+# 数据采集
+akshare>=1.14.0           # A股数据接口（免费）
+# tushare>=1.2.89         # 备用数据源（需要token）
+
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 数据库
+supabase>=2.0.0           # Supabase Python 客户端
+postgrest>=0.10.0         # PostgreSQL REST API 客户端
+
+# Web框架（如果需要后端API）
+fastapi>=0.104.0          # FastAPI 框架
+uvicorn[standard]>=0.24.0 # ASGI 服务器
+pydantic>=2.0.0           # 数据验证
+
+# 定时任务
+APScheduler>=3.10.0       # 任务调度器
+
+# 工具库
+python-dotenv>=1.0.0      # 环境变量管理
+requests>=2.31.0          # HTTP 请求
+python-dateutil>=2.8.2    # 日期处理
+
+# 日志
+loguru>=0.7.0             # 日志库（可选，比 logging 更友好）
+
+# 数据可视化（可选）
+matplotlib>=3.7.0
+plotly>=5.17.0
+
+# Excel导出（可选）
+openpyxl>=3.1.0           # Excel 读写
+xlsxwriter>=3.1.0         # Excel 写入
+
+# 性能优化（可选）
+ujson>=5.8.0              # 更快的JSON解析
+httpx>=0.25.0             # 异步HTTP客户端
+
+# 开发工具
+pytest>=7.4.0             # 测试框架
+black>=23.0.0             # 代码格式化
+flake8>=6.1.0             # 代码检查
