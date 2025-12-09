@@ -156,6 +156,33 @@ class MarketSentimentCollector:
             logger.error(f"采集跌停股池失败: {str(e)}")
             return pd.DataFrame()
 
+    def collect_exploded_pool(self, date: Optional[str] = None) -> pd.DataFrame:
+        """
+        采集炸板股池数据（触及涨停但未封住的股票）
+
+        Args:
+            date: 日期 YYYYMMDD，默认为今天
+
+        Returns:
+            DataFrame with exploded stocks
+        """
+        try:
+            logger.info("采集炸板股池数据...")
+
+            # 使用东方财富炸板股池接口
+            df = ak.stock_zt_pool_zbgc_em(date=date or datetime.now().strftime("%Y%m%d"))
+
+            if df is None or df.empty:
+                logger.warning("炸板股池数据为空")
+                return pd.DataFrame()
+
+            logger.info(f"成功采集炸板股池，共 {len(df)} 只炸板股")
+            return df
+
+        except Exception as e:
+            logger.error(f"采集炸板股池失败: {str(e)}")
+            return pd.DataFrame()
+
 
     def calculate_continuous_distribution(self, limit_up_df: pd.DataFrame) -> Dict[str, int]:
         """
@@ -165,11 +192,11 @@ class MarketSentimentCollector:
             limit_up_df: 涨停股池数据（包含连板天数）
 
         Returns:
-            连板分布字典 {"1": count, "2": count, "3": count, "4+": count}
+            连板分布字典 {"1": count, "2": count, "3": count, "4": count, "5": count, ...}
         """
         try:
             if limit_up_df.empty:
-                return {"1": 0, "2": 0, "3": 0, "4+": 0}
+                return {"1": 0}
 
             # 检查是否有连板天数字段
             continuous_col = None
@@ -180,10 +207,10 @@ class MarketSentimentCollector:
 
             if not continuous_col:
                 # 如果没有连板字段，默认都是首板
-                return {"1": len(limit_up_df), "2": 0, "3": 0, "4+": 0}
+                return {"1": len(limit_up_df)}
 
-            # 统计连板分布
-            distribution = {"1": 0, "2": 0, "3": 0, "4+": 0}
+            # 统计连板分布（不聚合，保留具体板数）
+            distribution = {}
 
             for value in limit_up_df[continuous_col]:
                 try:
@@ -199,58 +226,46 @@ class MarketSentimentCollector:
                     else:
                         days = int(value)
 
-                    if days == 1:
-                        distribution["1"] += 1
-                    elif days == 2:
-                        distribution["2"] += 1
-                    elif days == 3:
-                        distribution["3"] += 1
-                    else:
-                        distribution["4+"] += 1
+                    # 直接使用板数作为键
+                    key = str(days)
+                    distribution[key] = distribution.get(key, 0) + 1
 
                 except:
-                    distribution["1"] += 1
+                    distribution["1"] = distribution.get("1", 0) + 1
 
             logger.info(f"连板分布: {distribution}")
             return distribution
 
         except Exception as e:
             logger.error(f"计算连板分布失败: {str(e)}")
-            return {"1": 0, "2": 0, "3": 0, "4+": 0}
+            return {"1": 0}
 
-    def calculate_explosion_rate(self, limit_up_df: pd.DataFrame) -> tuple:
+    def calculate_explosion_rate(self, limit_up_count: int, exploded_df: pd.DataFrame) -> tuple:
         """
-        计算炸板率（基于真实数据）
+        计算炸板率（通用口径：炸板股数 / 触及涨停总数）
 
         Args:
-            limit_up_df: 涨停股池数据（包含开板次数）
+            limit_up_count: 涨停股数量（收盘封住的）
+            exploded_df: 炸板股池数据（触及涨停但未封住的）
 
         Returns:
             (炸板数, 炸板率)
         """
         try:
-            if limit_up_df.empty:
+            # 炸板股数量
+            exploded_count = len(exploded_df) if not exploded_df.empty else 0
+
+            # 总触及涨停数 = 涨停股数 + 炸板股数
+            total_touched = limit_up_count + exploded_count
+
+            if total_touched == 0:
+                logger.warning("没有股票触及涨停板")
                 return 0, 0.0
 
-            # 查找开板次数字段
-            open_times_col = None
-            for col in ['打开次数', '开板次数', '炸板次数']:
-                if col in limit_up_df.columns:
-                    open_times_col = col
-                    break
+            # 炸板率 = 炸板股数 / 总触及涨停数 × 100%
+            explosion_rate = (exploded_count / total_touched * 100) if total_touched > 0 else 0.0
 
-            if not open_times_col:
-                # 如果没有开板次数字段，返回0
-                logger.warning("涨停数据中没有找到开板次数字段，炸板率设为0")
-                return 0, 0.0
-
-            # 统计炸板股（开板次数 > 0）
-            exploded_count = (limit_up_df[open_times_col] > 0).sum()
-            total_count = len(limit_up_df)
-
-            explosion_rate = (exploded_count / total_count * 100) if total_count > 0 else 0.0
-
-            logger.info(f"炸板统计: {exploded_count}/{total_count} = {explosion_rate:.2f}%")
+            logger.info(f"炸板统计（通用口径）: 炸板{exploded_count}只 / 触及涨停{total_touched}只 = {explosion_rate:.2f}%")
             return exploded_count, explosion_rate
 
         except Exception as e:
@@ -286,7 +301,10 @@ class MarketSentimentCollector:
         # 4. 采集跌停股池
         limit_down_df = self.collect_limit_down_pool(date_akshare)
 
-        # 5. 从市场异动数据中提取涨跌家数
+        # 5. 采集炸板股池（触及涨停但未封住的）
+        exploded_df = self.collect_exploded_pool(date_akshare)
+
+        # 6. 从市场异动数据中提取涨跌家数
         up_count = int(market_activity.get('上涨', 0))
         down_count = int(market_activity.get('下跌', 0))
         flat_count = int(market_activity.get('平盘', 0))
@@ -294,15 +312,26 @@ class MarketSentimentCollector:
         # 计算涨跌比
         up_down_ratio = (up_count / down_count) if down_count > 0 else 0.0
 
-        # 6. 统计涨跌停数量
+        # 7. 统计涨跌停数量
         limit_up_count = len(limit_up_df)
         limit_down_count = len(limit_down_df)
 
-        # 7. 计算连板分布
+        # 8. 计算连板分布
         continuous_distribution = self.calculate_continuous_distribution(limit_up_df)
 
-        # 8. 计算炸板率
-        exploded_count, explosion_rate = self.calculate_explosion_rate(limit_up_df)
+        # 9. 计算炸板率（通用口径）
+        exploded_count, explosion_rate = self.calculate_explosion_rate(limit_up_count, exploded_df)
+
+        # 10. 计算市场状态（基于上涨股票占比）
+        total_stocks = up_count + down_count
+        up_pct = (up_count / total_stocks * 100) if total_stocks > 0 else 0
+
+        if up_pct >= 60:
+            market_status = "强势"
+        elif up_pct < 40:
+            market_status = "弱势"
+        else:
+            market_status = "震荡"
 
         sentiment_data = {
             "trade_date": trade_date,
@@ -316,6 +345,7 @@ class MarketSentimentCollector:
             "continuous_limit_distribution": continuous_distribution,
             "exploded_count": exploded_count,
             "explosion_rate": round(explosion_rate, 4),
+            "market_status": market_status,
         }
 
         logger.info(f"市场情绪数据采集完成: 涨{up_count}/跌{down_count}, 涨停{limit_up_count}/跌停{limit_down_count}, 总成交额{total_amount/1e8:.2f}亿, 炸板率{explosion_rate:.2f}%")
@@ -346,6 +376,7 @@ class MarketSentimentCollector:
                 "continuous_limit_distribution": json.dumps(sentiment_data["continuous_limit_distribution"]),
                 "exploded_count": int(sentiment_data.get("exploded_count", 0)),
                 "explosion_rate": float(sentiment_data["explosion_rate"]),
+                "market_status": sentiment_data["market_status"],
             }
 
             logger.info(f"保存市场情绪数据: {sentiment_data['trade_date']}")

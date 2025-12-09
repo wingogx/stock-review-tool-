@@ -121,15 +121,34 @@ async def get_config():
 
 
 # ============================================
-# 路由注册（稍后添加）
+# 路由注册
 # ============================================
 
-# TODO: 注册各模块路由
-# app.include_router(market_router, prefix="/api/v1/market", tags=["市场数据"])
-# app.include_router(limit_stocks_router, prefix="/api/v1/limit-stocks", tags=["涨停池"])
-# app.include_router(dragon_tiger_router, prefix="/api/v1/dragon-tiger", tags=["龙虎榜"])
-# app.include_router(concepts_router, prefix="/api/v1/concepts", tags=["热门概念"])
-# app.include_router(watchlist_router, prefix="/api/v1/watchlist", tags=["自选股"])
+from app.routers import market_router, limit_stocks_router, concepts_router
+
+# 市场数据路由
+app.include_router(
+    market_router,
+    prefix="/api/market",
+    tags=["市场数据"]
+)
+
+# 涨停池路由
+app.include_router(
+    limit_stocks_router,
+    prefix="/api/limit",
+    tags=["涨停池"]
+)
+
+# 概念板块路由
+app.include_router(
+    concepts_router,
+    prefix="/api/concepts",
+    tags=["概念板块"]
+)
+
+# TODO: 龙虎榜路由（需要先实现数据采集）
+# app.include_router(dragon_tiger_router, prefix="/api/dragon-tiger", tags=["龙虎榜"])
 
 
 if __name__ == "__main__":

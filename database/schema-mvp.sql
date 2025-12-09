@@ -118,7 +118,8 @@ CREATE TABLE hot_concepts (
     concept_name VARCHAR(100) NOT NULL,
 
     -- 板块数据
-    change_pct DECIMAL(10, 4),    -- 板块涨跌幅
+    day_change_pct DECIMAL(10, 4), -- 当日涨幅(%)
+    change_pct DECIMAL(10, 4),    -- 近5日涨跌幅(%)
     avg_change_pct DECIMAL(10, 4), -- 平均涨幅
 
     -- 成分股统计
@@ -133,15 +134,26 @@ CREATE TABLE hot_concepts (
 
     -- 概念强度评分
     strength_score DECIMAL(10, 4), -- 平均涨幅 × 上涨家数
+    concept_strength DECIMAL(10, 4), -- 概念强度（更精确的涨幅值）
 
-    -- 排名
+    -- 排名与上榜
     rank INT,                     -- 当日排名
+    consecutive_days INT DEFAULT 1, -- 连续上榜次数（统计前10范围）
+
+    -- 新概念标记
+    is_new_concept BOOLEAN DEFAULT FALSE, -- 是否新概念（历史数据不足5个交易日）
+    first_seen_date DATE,         -- 首次出现日期
 
     created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(trade_date, concept_name)
 );
 
 COMMENT ON TABLE hot_concepts IS '热门概念板块表 - 374个同花顺概念板块';
+
+-- 为新字段创建索引
+CREATE INDEX IF NOT EXISTS idx_hot_concepts_consecutive_days ON hot_concepts(consecutive_days DESC);
+CREATE INDEX IF NOT EXISTS idx_hot_concepts_is_new_concept ON hot_concepts(is_new_concept) WHERE is_new_concept = TRUE;
+CREATE INDEX IF NOT EXISTS idx_hot_concepts_first_seen_date ON hot_concepts(first_seen_date);
 
 -- ============================================
 -- 5. 概念成分股表（可选 - 如需要详细成分股列表）

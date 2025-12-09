@@ -120,6 +120,7 @@ class LimitStocksCollector:
             "连板数": "continuous_days",
             "打开次数": "opening_times",
             "开板次数": "opening_times",
+            "炸板次数": "opening_times",
             "封单金额": "sealed_amount",
             "总市值": "market_cap",
             "流通市值": "circulation_market_cap",
@@ -180,8 +181,24 @@ class LimitStocksCollector:
                 else:
                     record["concepts"] = []
 
-                # 判断是否一字板（开板次数为0）
-                record["is_strong_limit"] = (record.get("opening_times", 0) == 0)
+                # 判断是否一字板：炸板次数为0 且 首次封板时间 <= 09:30:00
+                opening_times = record.get("opening_times")
+                first_limit_time = record.get("first_limit_time")
+
+                # 一字板条件：
+                # 1. 炸板次数为0（从未开板）
+                # 2. 首次封板时间在 09:30:00 及之前（集合竞价或开盘瞬间涨停）
+                is_no_open = (opening_times is not None and opening_times == 0)
+                is_early_limit = False
+                if first_limit_time:
+                    try:
+                        # 时间格式可能是 "09:25:00", "09:30:00" 等
+                        time_str = str(first_limit_time).strip()
+                        is_early_limit = (time_str <= "09:30:00")
+                    except:
+                        is_early_limit = False
+
+                record["is_strong_limit"] = (is_no_open and is_early_limit)
 
                 # 必需字段校验
                 if "stock_code" in record and "stock_name" in record:

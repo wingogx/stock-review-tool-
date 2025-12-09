@@ -5,6 +5,7 @@
 
 import akshare as ak
 import pandas as pd
+import time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from loguru import logger
@@ -25,68 +26,77 @@ class MarketIndexCollector:
         }
 
     def collect_index_daily(
-        self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None
+        self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None, max_retries: int = 3
     ) -> pd.DataFrame:
         """
         采集指定指数的日线数据
 
         Args:
             symbol: 指数代码 (sh000001, sz399001, sz399006)
-            start_date: 开始日期 YYYYMMDD
-            end_date: 结束日期 YYYYMMDD
+            start_date: 开始日期 YYYY-MM-DD
+            end_date: 结束日期 YYYY-MM-DD
+            max_retries: 最大重试次数
 
         Returns:
             DataFrame with columns: date, open, high, low, close, volume, amount
         """
-        try:
-            logger.info(f"开始采集指数 {symbol} 的数据...")
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"开始采集指数 {symbol} 的数据... (尝试 {attempt + 1}/{max_retries})")
 
-            # 使用 AKShare 获取指数日线数据
-            df = ak.stock_zh_index_daily(symbol=symbol)
+                # 使用新浪接口获取指数日线数据（稳定可靠，数据更新通常在18:30前完成）
+                df = ak.stock_zh_index_daily(symbol=symbol)
 
-            if df is None or df.empty:
-                logger.warning(f"指数 {symbol} 没有数据")
-                return pd.DataFrame()
+                if df is None or df.empty:
+                    logger.warning(f"指数 {symbol} 没有数据")
+                    return pd.DataFrame()
 
-            # 重命名列
-            df = df.rename(
-                columns={
-                    "date": "trade_date",
-                    "open": "open_price",
-                    "high": "high_price",
-                    "low": "low_price",
-                    "close": "close_price",
-                    "volume": "volume",
-                }
-            )
+                # 重命名列（新浪接口没有amount字段）
+                df = df.rename(
+                    columns={
+                        "date": "trade_date",
+                        "open": "open_price",
+                        "high": "high_price",
+                        "low": "low_price",
+                        "close": "close_price",
+                        "volume": "volume",
+                    }
+                )
 
-            # 确保日期格式正确
-            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
+                # 添加amount字段为None（保持数据结构一致性）
+                df["amount"] = None
 
-            # 计算成交额（如果没有的话，使用 volume）
-            if "amount" not in df.columns:
-                df["amount"] = df["volume"] * df["close_price"]
+                # 确保日期格式正确
+                df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
 
-            # 计算涨跌幅
-            df["change_pct"] = df["close_price"].pct_change() * 100
+                # 计算涨跌幅
+                df["change_pct"] = df["close_price"].pct_change() * 100
 
-            # 计算振幅
-            df["amplitude"] = (
-                (df["high_price"] - df["low_price"]) / df["close_price"].shift(1) * 100
-            )
+                # 计算振幅
+                df["amplitude"] = (
+                    (df["high_price"] - df["low_price"]) / df["close_price"].shift(1) * 100
+                )
 
-            # 过滤日期范围
-            if start_date:
-                df = df[df["trade_date"] >= start_date]
-            if end_date:
-                df = df[df["trade_date"] <= end_date]
+                # 过滤日期范围（确保精确匹配）
+                if start_date:
+                    df = df[df["trade_date"] >= start_date]
+                if end_date:
+                    df = df[df["trade_date"] <= end_date]
 
-            logger.info(f"成功采集 {symbol} 数据，共 {len(df)} 条记录")
-            return df
+                logger.info(f"成功采集 {symbol} 数据，共 {len(df)} 条记录")
+                return df
 
-        except Exception as e:
-            logger.error(f"采集指数 {symbol} 数据失败: {str(e)}")
-            return pd.DataFrame()
+            except Exception as e:
+                logger.warning(f"采集指数 {symbol} 数据失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2  # 指数退避：2秒、4秒、6秒
+                    logger.info(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"采集指数 {symbol} 数据失败，已达最大重试次数")
+                    return pd.DataFrame()
+
+        return pd.DataFrame()
 
     def save_to_database(self, symbol: str, df: pd.DataFrame) -> int:
         """
@@ -165,12 +175,12 @@ class MarketIndexCollector:
         if not start_date:
             start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
-        # 转换为 AKShare 需要的格式 YYYYMMDD
-        start_date_ak = start_date.replace("-", "")
-        end_date_ak = end_date.replace("-", "")
-
-        for symbol in self.index_mapping.keys():
+        for i, symbol in enumerate(self.index_mapping.keys()):
             try:
+                # 在每个请求之间添加延迟，避免频繁请求
+                if i > 0:
+                    time.sleep(2)
+
                 # 采集数据
                 df = self.collect_index_daily(symbol, start_date, end_date)
 
