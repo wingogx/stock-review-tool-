@@ -201,6 +201,23 @@ export default function Dashboard() {
                   </div>
                 </div>
               </div>
+              {/* 市场状态标签 */}
+              <div className="mt-4 pt-4 border-t border-gray-100">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-500">市场状态:</span>
+                  <span
+                    className={`px-3 py-1 rounded-full text-sm font-medium ${
+                      marketSentiment?.data.market_status === '强势'
+                        ? 'bg-red-100 text-red-700'
+                        : marketSentiment?.data.market_status === '弱势'
+                        ? 'bg-green-100 text-green-700'
+                        : 'bg-yellow-100 text-yellow-700'
+                    }`}
+                  >
+                    {marketSentiment?.data.market_status ?? '震荡'}
+                  </span>
+                </div>
+              </div>
             </Card>
 
             {/* 热门概念表格 */}
@@ -375,46 +392,68 @@ export default function Dashboard() {
                       <table className="min-w-full divide-y divide-gray-200">
                         <thead className="bg-gray-50">
                           <tr>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">代码</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">名称</th>
-                            <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">涨幅</th>
-                            <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">收盘价</th>
-                            <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">成交额</th>
-                            <th className="px-4 py-2 text-right text-xs font-medium text-gray-500">换手率</th>
-                            <th className="px-4 py-2 text-center text-xs font-medium text-gray-500">首封时间</th>
-                            <th className="px-4 py-2 text-center text-xs font-medium text-gray-500">封板类型</th>
+                            <th className="px-3 py-2 text-center text-xs font-medium text-gray-500">序号</th>
+                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">代码</th>
+                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">名称</th>
+                            <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">涨跌幅</th>
+                            <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">最新价</th>
+                            <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">流通市值</th>
+                            <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">换手率</th>
+                            <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">封板资金</th>
+                            <th className="px-3 py-2 text-center text-xs font-medium text-gray-500">首次封板时间</th>
+                            <th className="px-3 py-2 text-center text-xs font-medium text-gray-500">炸板次数</th>
+                            <th className="px-3 py-2 text-center text-xs font-medium text-gray-500">涨停统计</th>
+                            <th className="px-3 py-2 text-center text-xs font-medium text-gray-500">封板类型</th>
+                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">所属行业</th>
                           </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
-                          {limitStocks.data.map((stock) => (
+                          {limitStocks.data.map((stock, index) => (
                             <tr key={stock.stock_code} className="hover:bg-gray-50">
-                              <td className="px-4 py-3 text-sm text-gray-600">{stock.stock_code}</td>
-                              <td className="px-4 py-3 text-sm font-medium text-gray-900">{stock.stock_name}</td>
-                              <td className="px-4 py-3 text-sm text-right text-red-600 font-medium">
+                              <td className="px-3 py-3 text-sm text-center text-gray-500">{index + 1}</td>
+                              <td className="px-3 py-3 text-sm text-gray-600">{stock.stock_code}</td>
+                              <td className="px-3 py-3 text-sm font-medium text-gray-900">{stock.stock_name}</td>
+                              <td className="px-3 py-3 text-sm text-right text-red-600 font-medium">
                                 +{stock.change_pct?.toFixed(2)}%
                               </td>
-                              <td className="px-4 py-3 text-sm text-right text-gray-900">
+                              <td className="px-3 py-3 text-sm text-right text-gray-900">
                                 {stock.close_price?.toFixed(2)}
                               </td>
-                              <td className="px-4 py-3 text-sm text-right text-gray-600">
-                                {stock.amount ? `${(stock.amount / 100000000).toFixed(2)}亿` : '-'}
+                              <td className="px-3 py-3 text-sm text-right text-gray-600">
+                                {stock.circulation_market_cap ? `${(stock.circulation_market_cap / 100000000).toFixed(1)}亿` : '-'}
                               </td>
-                              <td className="px-4 py-3 text-sm text-right text-gray-600">
+                              <td className="px-3 py-3 text-sm text-right text-gray-600">
                                 {stock.turnover_rate?.toFixed(2)}%
                               </td>
-                              <td className="px-4 py-3 text-sm text-center text-gray-600">
+                              <td className="px-3 py-3 text-sm text-right text-gray-600">
+                                {stock.sealed_amount ? `${(stock.sealed_amount / 100000000).toFixed(2)}亿` : '-'}
+                              </td>
+                              <td className="px-3 py-3 text-sm text-center text-gray-600">
                                 {stock.first_limit_time || '-'}
                               </td>
-                              <td className="px-4 py-3 text-sm text-center">
+                              <td className="px-3 py-3 text-sm text-center">
+                                {stock.opening_times !== undefined && stock.opening_times !== null ? (
+                                  <span className={stock.opening_times > 0 ? 'text-orange-600 font-medium' : 'text-gray-600'}>
+                                    {stock.opening_times}
+                                  </span>
+                                ) : '-'}
+                              </td>
+                              <td className="px-3 py-3 text-sm text-center text-gray-600">
+                                {stock.limit_stats || '-'}
+                              </td>
+                              <td className="px-3 py-3 text-sm text-center">
                                 {stock.is_strong_limit ? (
-                                  <span className="px-2 py-0.5 text-xs bg-red-100 text-red-600 rounded">
+                                  <span className="px-2 py-0.5 text-xs bg-red-100 text-red-600 rounded font-medium">
                                     一字板
                                   </span>
                                 ) : (
-                                  <span className="px-2 py-0.5 text-xs bg-gray-100 text-gray-600 rounded">
+                                  <span className="px-2 py-0.5 text-xs bg-yellow-100 text-yellow-700 rounded font-medium">
                                     换手板
                                   </span>
                                 )}
+                              </td>
+                              <td className="px-3 py-3 text-sm text-gray-600">
+                                {stock.industry || '-'}
                               </td>
                             </tr>
                           ))}

@@ -87,6 +87,8 @@ export interface LimitStockItem {
   circulation_market_cap?: number;
   concepts?: string[];
   limit_reason?: string;
+  limit_stats?: string;
+  industry?: string;
 }
 
 export interface LimitStocksResponse {

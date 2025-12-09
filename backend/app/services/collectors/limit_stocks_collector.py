@@ -122,8 +122,11 @@ class LimitStocksCollector:
             "开板次数": "opening_times",
             "炸板次数": "opening_times",
             "封单金额": "sealed_amount",
+            "封板资金": "sealed_amount",
             "总市值": "market_cap",
             "流通市值": "circulation_market_cap",
+            "涨停统计": "limit_stats",
+            "所属行业": "industry",
         }
 
         for _, row in df.iterrows():
@@ -141,7 +144,7 @@ class LimitStocksCollector:
                         # 处理不同类型的值
                         if pd.isna(value):
                             record[db_col] = None
-                        elif db_col in ["stock_code", "stock_name"]:
+                        elif db_col in ["stock_code", "stock_name", "limit_stats", "industry"]:
                             record[db_col] = str(value)
                         elif db_col in ["first_limit_time", "last_limit_time"]:
                             # 时间格式处理

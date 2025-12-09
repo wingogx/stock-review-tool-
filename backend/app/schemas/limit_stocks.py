@@ -29,6 +29,8 @@ class LimitStockItem(BaseModel):
     circulation_market_cap: Optional[float] = Field(None, description="流通市值")
     concepts: Optional[List[str]] = Field(default_factory=list, description="所属概念")
     is_strong_limit: Optional[bool] = Field(None, description="是否一字板")
+    limit_stats: Optional[str] = Field(None, description="涨停统计")
+    industry: Optional[str] = Field(None, description="所属行业")
 
     class Config:
         from_attributes = True
