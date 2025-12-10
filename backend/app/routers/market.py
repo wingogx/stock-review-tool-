@@ -16,7 +16,118 @@ from app.schemas.market import (
     MarketSentimentItem,
     MarketStatsResponse,
     MarketStatsItem,
+    SentimentScoreDetail,
 )
+
+
+def calculate_sentiment_score(data: dict) -> SentimentScoreDetail:
+    """
+    计算市场情绪评分
+
+    评分维度：
+    1. 上涨占比: >50% +1, 30%-50% 0, <30% -1
+    2. 成交额变化: >+10% +1, ±10% 0, <-10% -1
+    3. 涨停数变化: 增加 +1, 小幅减少 0, 大幅减少(>30%) -1
+    4. 跌停数变化: 减少 +1, 小幅增加 0, 大幅增加(>50%) -1
+    5. 炸板率: <20% +1, 20%-30% 0, >30% -1
+    """
+    scores = {}
+
+    # 1. 上涨占比得分
+    up_count = data.get('up_count', 0)
+    down_count = data.get('down_count', 0)
+    total = up_count + down_count
+    up_ratio = (up_count / total * 100) if total > 0 else 0
+
+    if up_ratio > 50:
+        scores['up_ratio_score'] = 1
+    elif up_ratio < 30:
+        scores['up_ratio_score'] = -1
+    else:
+        scores['up_ratio_score'] = 0
+
+    # 2. 成交额变化得分
+    amount_change_pct = data.get('total_amount_change_pct')
+    if amount_change_pct is not None:
+        if amount_change_pct > 10:
+            scores['amount_change_score'] = 1
+        elif amount_change_pct < -10:
+            scores['amount_change_score'] = -1
+        else:
+            scores['amount_change_score'] = 0
+    else:
+        scores['amount_change_score'] = 0
+
+    # 3. 涨停数变化得分
+    limit_up = data.get('limit_up_count', 0)
+    prev_limit_up = data.get('prev_limit_up_count')
+    if prev_limit_up is not None and prev_limit_up > 0:
+        if limit_up > prev_limit_up:
+            scores['limit_up_change_score'] = 1
+        elif limit_up < prev_limit_up * 0.7:  # 降幅超过30%
+            scores['limit_up_change_score'] = -1
+        else:
+            scores['limit_up_change_score'] = 0
+    else:
+        scores['limit_up_change_score'] = 0
+
+    # 4. 跌停数变化得分
+    limit_down = data.get('limit_down_count', 0)
+    prev_limit_down = data.get('prev_limit_down_count')
+    if prev_limit_down is not None:
+        if prev_limit_down == 0:
+            # 昨日跌停为0的特殊处理
+            if limit_down <= 3:
+                scores['limit_down_change_score'] = 0
+            else:
+                scores['limit_down_change_score'] = -1
+        else:
+            if limit_down < prev_limit_down:
+                scores['limit_down_change_score'] = 1
+            elif limit_down > prev_limit_down * 1.5:  # 增幅超过50%
+                scores['limit_down_change_score'] = -1
+            else:
+                scores['limit_down_change_score'] = 0
+    else:
+        scores['limit_down_change_score'] = 0
+
+    # 5. 炸板率得分
+    explosion_rate = data.get('explosion_rate', 0)
+    if explosion_rate < 20:
+        scores['explosion_rate_score'] = 1
+    elif explosion_rate > 30:
+        scores['explosion_rate_score'] = -1
+    else:
+        scores['explosion_rate_score'] = 0
+
+    # 计算总分
+    total_score = sum(scores.values())
+    scores['total_score'] = total_score
+
+    # 确定情绪等级和颜色
+    if total_score >= 4:
+        scores['sentiment_level'] = '极度亢奋'
+        scores['sentiment_color'] = 'deep_red'
+    elif total_score >= 2:
+        scores['sentiment_level'] = '情绪偏热'
+        scores['sentiment_color'] = 'orange'
+    elif total_score == 1:
+        scores['sentiment_level'] = '情绪偏暖'
+        scores['sentiment_color'] = 'yellow'
+    elif total_score == 0:
+        scores['sentiment_level'] = '情绪中性'
+        scores['sentiment_color'] = 'gray'
+    elif total_score == -1:
+        scores['sentiment_level'] = '情绪偏冷'
+        scores['sentiment_color'] = 'yellow'
+    elif total_score >= -3:
+        scores['sentiment_level'] = '情绪偏弱'
+        scores['sentiment_color'] = 'blue'
+    else:
+        scores['sentiment_level'] = '极度冰点'
+        scores['sentiment_color'] = 'green'
+
+    return SentimentScoreDetail(**scores)
 
 router = APIRouter()
 
@@ -48,8 +159,33 @@ async def get_market_index(
                 detail=f"未找到 {trade_date} 的大盘指数数据"
             )
 
-        # 转换数据
-        indexes = [MarketIndexItem.model_validate(item) for item in response.data]
+        # 查询前一交易日数据用于计算成交量环比
+        prev_response = supabase.table("market_index").select("index_code,volume").lt(
+            "trade_date", trade_date
+        ).order("trade_date", desc=True).limit(3).execute()
+
+        # 构建前一日成交量映射
+        prev_volume_map = {}
+        if prev_response.data:
+            for item in prev_response.data:
+                if item['index_code'] not in prev_volume_map:
+                    prev_volume_map[item['index_code']] = item['volume']
+
+        # 转换数据并计算成交量环比
+        indexes = []
+        for item in response.data:
+            # 计算成交量环比变化率
+            index_code = item['index_code']
+            current_volume = item.get('volume')
+            prev_volume = prev_volume_map.get(index_code)
+
+            if current_volume and prev_volume and prev_volume > 0:
+                volume_change_pct = round((current_volume - prev_volume) / prev_volume * 100, 2)
+                item['volume_change_pct'] = volume_change_pct
+            else:
+                item['volume_change_pct'] = None
+
+            indexes.append(MarketIndexItem.model_validate(item))
 
         return MarketIndexResponse(
             success=True,
@@ -102,7 +238,7 @@ async def get_market_sentiment(
 
         # 查询前两个交易日的数据以计算环比和对比
         try:
-            prev_response = supabase.table("market_sentiment").select("total_amount,limit_up_count,limit_down_count,continuous_limit_distribution").lt(
+            prev_response = supabase.table("market_sentiment").select("total_amount,limit_up_count,limit_down_count,explosion_rate,continuous_limit_distribution").lt(
                 "trade_date", trade_date
             ).order("trade_date", desc=True).limit(2).execute()
 
@@ -122,6 +258,7 @@ async def get_market_sentiment(
                 # 添加前1日涨停跌停数据
                 data['prev_limit_up_count'] = prev_data.get('limit_up_count')
                 data['prev_limit_down_count'] = prev_data.get('limit_down_count')
+                data['prev_explosion_rate'] = prev_data.get('explosion_rate')
 
                 # 添加前1日连板分布
                 prev_distribution = prev_data.get('continuous_limit_distribution')
@@ -146,6 +283,7 @@ async def get_market_sentiment(
                 data['total_amount_change_pct'] = None
                 data['prev_limit_up_count'] = None
                 data['prev_limit_down_count'] = None
+                data['prev_explosion_rate'] = None
                 data['prev_continuous_limit_distribution'] = None
                 data['prev2_continuous_limit_distribution'] = None
         except Exception as e:
@@ -154,8 +292,13 @@ async def get_market_sentiment(
             data['total_amount_change_pct'] = None
             data['prev_limit_up_count'] = None
             data['prev_limit_down_count'] = None
+            data['prev_explosion_rate'] = None
             data['prev_continuous_limit_distribution'] = None
             data['prev2_continuous_limit_distribution'] = None
+
+        # 计算情绪评分
+        sentiment_score = calculate_sentiment_score(data)
+        data['sentiment_score'] = sentiment_score
 
         sentiment = MarketSentimentItem(**data)
 

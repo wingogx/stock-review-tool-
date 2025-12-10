@@ -24,6 +24,7 @@ class MarketIndexItem(BaseModel):
     volume: Optional[float] = Field(None, description="成交量")
     amount: Optional[float] = Field(None, description="成交额")
     amplitude: Optional[float] = Field(None, description="振幅(%)")
+    volume_change_pct: Optional[float] = Field(None, description="成交量环比变化率(%)")
 
     class Config:
         from_attributes = True
@@ -41,6 +42,18 @@ class MarketIndexResponse(BaseModel):
 # 市场情绪 Schemas
 # ============================================
 
+class SentimentScoreDetail(BaseModel):
+    """情绪评分明细"""
+    up_ratio_score: int = Field(..., description="上涨占比得分(-1/0/+1)")
+    amount_change_score: int = Field(..., description="成交额变化得分(-1/0/+1)")
+    limit_up_change_score: int = Field(..., description="涨停数变化得分(-1/0/+1)")
+    limit_down_change_score: int = Field(..., description="跌停数变化得分(-1/0/+1)")
+    explosion_rate_score: int = Field(..., description="炸板率得分(-1/0/+1)")
+    total_score: int = Field(..., description="总得分(-5~+5)")
+    sentiment_level: str = Field(..., description="情绪等级")
+    sentiment_color: str = Field(..., description="情绪颜色标识")
+
+
 class MarketSentimentItem(BaseModel):
     """市场情绪数据"""
     trade_date: str = Field(..., description="交易日期")
@@ -55,12 +68,14 @@ class MarketSentimentItem(BaseModel):
     limit_down_count: int = Field(..., description="跌停数量")
     prev_limit_up_count: Optional[int] = Field(None, description="昨日涨停数量")
     prev_limit_down_count: Optional[int] = Field(None, description="昨日跌停数量")
+    prev_explosion_rate: Optional[float] = Field(None, description="昨日炸板率(%)")
     continuous_limit_distribution: Dict[str, int] = Field(..., description="连板分布")
     prev_continuous_limit_distribution: Optional[Dict[str, int]] = Field(None, description="前1日连板分布")
     prev2_continuous_limit_distribution: Optional[Dict[str, int]] = Field(None, description="前2日连板分布")
     exploded_count: int = Field(0, description="炸板数量")
     explosion_rate: float = Field(..., description="炸板率(%)")
     market_status: str = Field(default="震荡", description="市场状态: 强势/震荡/弱势")
+    sentiment_score: Optional[SentimentScoreDetail] = Field(None, description="情绪评分明细")
 
     class Config:
         from_attributes = True

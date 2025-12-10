@@ -11,19 +11,37 @@ export interface MarketIndex {
   change_pct: number;
   volume?: number;
   amount?: number;
+  volume_change_pct?: number;
+}
+
+// 情绪评分明细
+export interface SentimentScoreDetail {
+  up_ratio_score: number;
+  amount_change_score: number;
+  limit_up_change_score: number;
+  limit_down_change_score: number;
+  explosion_rate_score: number;
+  total_score: number;
+  sentiment_level: string;
+  sentiment_color: string;
 }
 
 // 市场情绪
 export interface MarketSentiment {
   trade_date: string;
   total_amount: number;
+  total_amount_change_pct?: number;
   up_count: number;
   down_count: number;
   up_down_ratio: number;
   limit_up_count: number;
   limit_down_count: number;
+  prev_limit_up_count?: number;
+  prev_limit_down_count?: number;
   explosion_rate?: number;
+  prev_explosion_rate?: number;
   continuous_limit_distribution?: Record<string, number>;
+  sentiment_score?: SentimentScoreDetail;
 }
 
 // 涨停股票

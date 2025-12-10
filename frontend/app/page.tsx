@@ -84,9 +84,15 @@ export default function Dashboard() {
                         </span>
                       </div>
                       <div>
-                        成交额:{' '}
-                        <span className="font-medium">
-                          {index.amount ? `${(index.amount / 100000000).toFixed(0)}亿` : '-'}
+                        较昨日:{' '}
+                        <span className={`font-medium ${
+                          index.volume_change_pct !== undefined && index.volume_change_pct !== null
+                            ? index.volume_change_pct >= 0 ? 'text-red-600' : 'text-green-600'
+                            : ''
+                        }`}>
+                          {index.volume_change_pct !== undefined && index.volume_change_pct !== null
+                            ? `${index.volume_change_pct >= 0 ? '+' : ''}${index.volume_change_pct.toFixed(1)}%`
+                            : '-'}
                         </span>
                       </div>
                     </div>
@@ -98,6 +104,7 @@ export default function Dashboard() {
             {/* 市场情绪 */}
             <Card title="市场情绪" subtitle="涨跌分布与市场状态">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                {/* 第1列: 上涨占比 + 总成交额 */}
                 <div>
                   <div className="text-sm text-gray-500">上涨股票占比</div>
                   <div
@@ -154,61 +161,195 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </div>
-                <div>
-                  <div className="text-sm text-gray-500">涨停数</div>
-                  <div className="text-2xl font-bold text-red-600 mt-1">
-                    {marketSentiment?.data.limit_up_count ?? '-'}
+                {/* 第2-4列: 涨停/跌停/炸板率/情绪状态 + 情绪评分条 (上下布局) */}
+                <div className="col-span-1 md:col-span-3">
+                  {/* 上方: 涨停数、跌停数、炸板率、情绪状态 - 平铺展开 */}
+                  <div className="grid grid-cols-4 gap-6 mb-4">
+                    {/* 涨停数 */}
+                    <div className="text-center">
+                      <div className="text-sm text-gray-500">涨停数</div>
+                      <div className="flex items-center justify-center gap-1 mt-1">
+                        <span className="text-2xl font-bold text-red-600">
+                          {marketSentiment?.data.limit_up_count ?? '-'}
+                        </span>
+                        {marketSentiment?.data.prev_limit_up_count !== undefined &&
+                          marketSentiment?.data.prev_limit_up_count !== null &&
+                          marketSentiment?.data.limit_up_count !== undefined && (
+                            <span className={`text-lg ${
+                              marketSentiment.data.limit_up_count > marketSentiment.data.prev_limit_up_count
+                                ? 'text-red-500'
+                                : marketSentiment.data.limit_up_count < marketSentiment.data.prev_limit_up_count
+                                ? 'text-green-500'
+                                : 'text-gray-400'
+                            }`}>
+                              {marketSentiment.data.limit_up_count > marketSentiment.data.prev_limit_up_count
+                                ? '↑'
+                                : marketSentiment.data.limit_up_count < marketSentiment.data.prev_limit_up_count
+                                ? '↓'
+                                : ''}
+                            </span>
+                          )}
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        {marketSentiment?.data.prev_limit_up_count !== undefined &&
+                        marketSentiment?.data.prev_limit_up_count !== null
+                          ? `昨日: ${marketSentiment.data.prev_limit_up_count}`
+                          : ''}
+                      </div>
+                    </div>
+                    {/* 跌停数 */}
+                    <div className="text-center">
+                      <div className="text-sm text-gray-500">跌停数</div>
+                      <div className="flex items-center justify-center gap-1 mt-1">
+                        <span className="text-2xl font-bold text-green-600">
+                          {marketSentiment?.data.limit_down_count ?? '-'}
+                        </span>
+                        {marketSentiment?.data.prev_limit_down_count !== undefined &&
+                          marketSentiment?.data.prev_limit_down_count !== null &&
+                          marketSentiment?.data.limit_down_count !== undefined && (
+                            <span className={`text-lg ${
+                              marketSentiment.data.limit_down_count > marketSentiment.data.prev_limit_down_count
+                                ? 'text-red-500'
+                                : marketSentiment.data.limit_down_count < marketSentiment.data.prev_limit_down_count
+                                ? 'text-green-500'
+                                : 'text-gray-400'
+                            }`}>
+                              {marketSentiment.data.limit_down_count > marketSentiment.data.prev_limit_down_count
+                                ? '↑'
+                                : marketSentiment.data.limit_down_count < marketSentiment.data.prev_limit_down_count
+                                ? '↓'
+                                : ''}
+                            </span>
+                          )}
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        {marketSentiment?.data.prev_limit_down_count !== undefined &&
+                        marketSentiment?.data.prev_limit_down_count !== null
+                          ? `昨日: ${marketSentiment.data.prev_limit_down_count}`
+                          : ''}
+                      </div>
+                    </div>
+                    {/* 炸板率 */}
+                    <div className="text-center">
+                      <div className="text-sm text-gray-500">炸板率</div>
+                      <div className="flex items-center justify-center gap-1 mt-1">
+                        <span
+                          className={`text-2xl font-bold ${
+                            (marketSentiment?.data.explosion_rate ?? 0) > 30
+                              ? 'text-red-600'
+                              : 'text-green-600'
+                          }`}
+                        >
+                          {marketSentiment?.data.explosion_rate?.toFixed(1) ?? '-'}%
+                        </span>
+                        {marketSentiment?.data.prev_explosion_rate !== undefined &&
+                          marketSentiment?.data.prev_explosion_rate !== null &&
+                          marketSentiment?.data.explosion_rate !== undefined && (
+                            <span className={`text-lg ${
+                              marketSentiment.data.explosion_rate > marketSentiment.data.prev_explosion_rate
+                                ? 'text-red-500'
+                                : marketSentiment.data.explosion_rate < marketSentiment.data.prev_explosion_rate
+                                ? 'text-green-500'
+                                : 'text-gray-400'
+                            }`}>
+                              {marketSentiment.data.explosion_rate > marketSentiment.data.prev_explosion_rate
+                                ? '↑'
+                                : marketSentiment.data.explosion_rate < marketSentiment.data.prev_explosion_rate
+                                ? '↓'
+                                : ''}
+                            </span>
+                          )}
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        {marketSentiment?.data.prev_explosion_rate !== undefined &&
+                        marketSentiment?.data.prev_explosion_rate !== null
+                          ? `昨日: ${marketSentiment.data.prev_explosion_rate.toFixed(1)}%`
+                          : ''}
+                      </div>
+                    </div>
+                    {/* 情绪状态 */}
+                    {marketSentiment?.data.sentiment_score && (
+                      <div className="text-center">
+                        <div className="text-sm text-gray-500">情绪状态</div>
+                        <div
+                          className={`text-2xl font-bold mt-1 ${
+                            marketSentiment.data.sentiment_score.sentiment_color === 'deep_red'
+                              ? 'text-red-500'
+                              : marketSentiment.data.sentiment_score.sentiment_color === 'orange'
+                              ? 'text-orange-500'
+                              : marketSentiment.data.sentiment_score.sentiment_color === 'yellow'
+                              ? 'text-yellow-500'
+                              : marketSentiment.data.sentiment_score.sentiment_color === 'gray'
+                              ? 'text-gray-500'
+                              : marketSentiment.data.sentiment_score.sentiment_color === 'blue'
+                              ? 'text-blue-500'
+                              : marketSentiment.data.sentiment_score.sentiment_color === 'green'
+                              ? 'text-green-500'
+                              : 'text-gray-500'
+                          }`}
+                        >
+                          {marketSentiment.data.sentiment_score.sentiment_level}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <div className="text-xs text-gray-400 mt-1">
-                    {marketSentiment?.data.prev_limit_up_count !== undefined &&
-                    marketSentiment?.data.prev_limit_up_count !== null
-                      ? `昨日: ${marketSentiment.data.prev_limit_up_count}`
-                      : ''}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-sm text-gray-500">跌停数</div>
-                  <div className="text-2xl font-bold text-green-600 mt-1">
-                    {marketSentiment?.data.limit_down_count ?? '-'}
-                  </div>
-                  <div className="text-xs text-gray-400 mt-1">
-                    {marketSentiment?.data.prev_limit_down_count !== undefined &&
-                    marketSentiment?.data.prev_limit_down_count !== null
-                      ? `昨日: ${marketSentiment.data.prev_limit_down_count}`
-                      : ''}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-sm text-gray-500">炸板率</div>
-                  <div
-                    className={`text-2xl font-bold mt-1 ${
-                      (marketSentiment?.data.explosion_rate ?? 0) > 30
-                        ? 'text-red-600'
-                        : 'text-green-600'
-                    }`}
-                  >
-                    {marketSentiment?.data.explosion_rate?.toFixed(1) ?? '-'}%
-                  </div>
-                  <div className="text-xs text-gray-400 mt-1">
-                    {(marketSentiment?.data.explosion_rate ?? 0) > 30 ? '情绪较差' : '情绪正常'}
-                  </div>
-                </div>
-              </div>
-              {/* 市场状态标签 */}
-              <div className="mt-4 pt-4 border-t border-gray-100">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-500">市场状态:</span>
-                  <span
-                    className={`px-3 py-1 rounded-full text-sm font-medium ${
-                      marketSentiment?.data.market_status === '强势'
-                        ? 'bg-red-100 text-red-700'
-                        : marketSentiment?.data.market_status === '弱势'
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-yellow-100 text-yellow-700'
-                    }`}
-                  >
-                    {marketSentiment?.data.market_status ?? '震荡'}
-                  </span>
+                  {/* 下方: 情绪评分条 - 使用grid对齐 */}
+                  {marketSentiment?.data.sentiment_score && (
+                    <div className="grid grid-cols-4 gap-6">
+                      {/* 情绪条占3列 */}
+                      <div className="col-span-3 relative">
+                        <div className="h-6 rounded-full overflow-hidden flex border border-gray-200">
+                          <div className="bg-green-400 h-full" style={{ width: '18.18%' }} />
+                          <div className="bg-blue-400 h-full" style={{ width: '18.18%' }} />
+                          <div className="bg-yellow-400 h-full" style={{ width: '9.09%' }} />
+                          <div className="bg-gray-300 h-full" style={{ width: '9.09%' }} />
+                          <div className="bg-yellow-400 h-full" style={{ width: '9.09%' }} />
+                          <div className="bg-orange-400 h-full" style={{ width: '18.18%' }} />
+                          <div className="bg-red-500 h-full" style={{ width: '18.18%' }} />
+                        </div>
+                        <div
+                          className="absolute top-0 transform -translate-x-1/2"
+                          style={{
+                            left: `${((marketSentiment.data.sentiment_score.total_score + 5) / 10) * 100}%`
+                          }}
+                        >
+                          <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-gray-700 -mt-2" />
+                        </div>
+                        <div className="relative mt-0.5 h-4">
+                          {[-5, -3, -1, 0, 1, 3, 5].map((num) => (
+                            <div
+                              key={num}
+                              className="absolute flex flex-col items-center transform -translate-x-1/2"
+                              style={{ left: `${((num + 5) / 10) * 100}%` }}
+                            >
+                              <div className="w-px h-1.5 bg-gray-300" />
+                              <span className="text-[10px] text-gray-400">{num > 0 ? `+${num}` : num}</span>
+                            </div>
+                          ))}
+                        </div>
+                        {/* 评分明细标签 */}
+                        <div className="flex justify-center gap-3 mt-2 text-[10px]">
+                          <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.up_ratio_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.up_ratio_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
+                            涨跌{marketSentiment.data.sentiment_score.up_ratio_score > 0 ? '+1' : marketSentiment.data.sentiment_score.up_ratio_score < 0 ? '-1' : '0'}
+                          </span>
+                          <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.amount_change_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.amount_change_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
+                            量能{marketSentiment.data.sentiment_score.amount_change_score > 0 ? '+1' : marketSentiment.data.sentiment_score.amount_change_score < 0 ? '-1' : '0'}
+                          </span>
+                          <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.limit_up_change_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.limit_up_change_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
+                            涨停{marketSentiment.data.sentiment_score.limit_up_change_score > 0 ? '+1' : marketSentiment.data.sentiment_score.limit_up_change_score < 0 ? '-1' : '0'}
+                          </span>
+                          <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.limit_down_change_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.limit_down_change_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
+                            跌停{marketSentiment.data.sentiment_score.limit_down_change_score > 0 ? '+1' : marketSentiment.data.sentiment_score.limit_down_change_score < 0 ? '-1' : '0'}
+                          </span>
+                          <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.explosion_rate_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.explosion_rate_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
+                            炸板{marketSentiment.data.sentiment_score.explosion_rate_score > 0 ? '+1' : marketSentiment.data.sentiment_score.explosion_rate_score < 0 ? '-1' : '0'}
+                          </span>
+                        </div>
+                      </div>
+                      {/* 第4列留空，与上方"情绪状态"对齐 */}
+                      <div></div>
+                    </div>
+                  )}
                 </div>
               </div>
             </Card>
