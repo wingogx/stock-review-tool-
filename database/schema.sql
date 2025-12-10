@@ -97,6 +97,10 @@ CREATE TABLE limit_stocks_detail (
     market_cap DECIMAL(20, 2),    -- 总市值
     circulation_market_cap DECIMAL(20, 2), -- 流通市值
 
+    -- 资金流向
+    main_net_inflow DECIMAL(20, 2),        -- 主力净流入（超大单+大单）
+    main_net_inflow_pct DECIMAL(10, 4),    -- 主力净流入占比(%)
+
     created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(trade_date, stock_code, limit_type)
 );

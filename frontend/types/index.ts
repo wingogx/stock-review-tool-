@@ -37,6 +37,8 @@ export interface LimitStock {
   opening_times?: number;
   first_limit_time?: string;
   concepts?: string[];
+  main_net_inflow?: number;
+  main_net_inflow_pct?: number;
 }
 
 // 热门概念

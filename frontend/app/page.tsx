@@ -48,13 +48,6 @@ export default function Dashboard() {
   return (
     <main className="min-h-screen bg-gray-50 p-8">
       <div className="max-w-7xl mx-auto">
-        {/* 页面标题 */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900">股票短线复盘</h1>
-          <p className="text-gray-600 mt-2">
-            交易日期: {marketIndex?.data[0]?.trade_date || format(new Date(), 'yyyy-MM-dd')}
-          </p>
-        </div>
 
         {isLoading && (
           <div className="text-center py-12">
@@ -400,11 +393,11 @@ export default function Dashboard() {
                             <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">流通市值</th>
                             <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">换手率</th>
                             <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">封板资金</th>
+                            <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">主力净额</th>
                             <th className="px-3 py-2 text-center text-xs font-medium text-gray-500">首次封板时间</th>
                             <th className="px-3 py-2 text-center text-xs font-medium text-gray-500">炸板次数</th>
                             <th className="px-3 py-2 text-center text-xs font-medium text-gray-500">涨停统计</th>
                             <th className="px-3 py-2 text-center text-xs font-medium text-gray-500">封板类型</th>
-                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">所属行业</th>
                           </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
@@ -427,6 +420,13 @@ export default function Dashboard() {
                               </td>
                               <td className="px-3 py-3 text-sm text-right text-gray-600">
                                 {stock.sealed_amount ? `${(stock.sealed_amount / 100000000).toFixed(2)}亿` : '-'}
+                              </td>
+                              <td className="px-3 py-3 text-sm text-right">
+                                {stock.main_net_inflow !== undefined && stock.main_net_inflow !== null ? (
+                                  <span className={stock.main_net_inflow >= 0 ? 'text-red-600 font-medium' : 'text-green-600 font-medium'}>
+                                    {stock.main_net_inflow >= 0 ? '+' : ''}{(stock.main_net_inflow / 100000000).toFixed(2)}亿
+                                  </span>
+                                ) : '-'}
                               </td>
                               <td className="px-3 py-3 text-sm text-center text-gray-600">
                                 {stock.first_limit_time || '-'}
@@ -451,9 +451,6 @@ export default function Dashboard() {
                                     换手板
                                   </span>
                                 )}
-                              </td>
-                              <td className="px-3 py-3 text-sm text-gray-600">
-                                {stock.industry || '-'}
                               </td>
                             </tr>
                           ))}

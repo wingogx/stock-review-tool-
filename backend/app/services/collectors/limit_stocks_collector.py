@@ -5,6 +5,7 @@
 数据来源:
 - stock_zt_pool_em: 涨停股池（真实数据）
 - stock_zt_pool_dtgc_em: 跌停股池（真实数据）
+- stock_individual_fund_flow: 个股资金流向（主力/散户净流入）
 包含: 股票代码、名称、涨跌幅、封板时间、连板天数、开板次数、封单金额等
 """
 
@@ -13,6 +14,7 @@ import pandas as pd
 from datetime import datetime
 from typing import Optional, List, Dict
 from loguru import logger
+import time
 
 from app.utils.supabase_client import get_supabase
 from app.utils.trading_date import get_latest_trading_date
@@ -23,6 +25,51 @@ class LimitStocksCollector:
 
     def __init__(self):
         self.supabase = get_supabase()
+        self._fund_flow_cache = {}  # 缓存资金流向数据
+
+    def get_fund_flow_data(self, stock_code: str, trade_date: str) -> Dict:
+        """
+        获取个股资金流向数据
+
+        Args:
+            stock_code: 股票代码（6位数字）
+            trade_date: 交易日期 YYYY-MM-DD
+
+        Returns:
+            包含主力净流入和散户净流入的字典
+        """
+        cache_key = f"{stock_code}_{trade_date}"
+        if cache_key in self._fund_flow_cache:
+            return self._fund_flow_cache[cache_key]
+
+        result = {
+            "main_net_inflow": None,
+            "main_net_inflow_pct": None,
+        }
+
+        try:
+            # 判断市场：6开头为上海，0/3开头为深圳
+            if stock_code.startswith("6"):
+                market = "sh"
+            else:
+                market = "sz"
+
+            df = ak.stock_individual_fund_flow(stock=stock_code, market=market)
+
+            if df is not None and not df.empty:
+                df["日期"] = pd.to_datetime(df["日期"])
+                row = df[df["日期"] == trade_date]
+
+                if not row.empty:
+                    r = row.iloc[0]
+                    result["main_net_inflow"] = float(r["主力净流入-净额"]) if pd.notna(r["主力净流入-净额"]) else None
+                    result["main_net_inflow_pct"] = float(r["主力净流入-净占比"]) if pd.notna(r["主力净流入-净占比"]) else None
+
+        except Exception as e:
+            logger.warning(f"获取 {stock_code} 资金流向失败: {e}")
+
+        self._fund_flow_cache[cache_key] = result
+        return result
 
     def collect_limit_up_stocks(self, date: Optional[str] = None) -> pd.DataFrame:
         """
@@ -211,6 +258,19 @@ class LimitStocksCollector:
                 logger.warning(f"处理涨停股数据失败: {e}, row: {row.to_dict()}")
                 continue
 
+        # 批量获取资金流向数据
+        logger.info(f"开始获取 {len(records)} 只涨停股的资金流向数据...")
+        for i, record in enumerate(records):
+            try:
+                fund_flow = self.get_fund_flow_data(record["stock_code"], trade_date)
+                record.update(fund_flow)
+                # 每获取10只股票休息一下，避免请求过快
+                if (i + 1) % 10 == 0:
+                    logger.info(f"已获取 {i + 1}/{len(records)} 只股票的资金流向")
+                    time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"获取 {record['stock_code']} 资金流向失败: {e}")
+
         logger.info(f"处理涨停股数据完成，共 {len(records)} 条有效记录")
         return records
 
@@ -279,6 +339,18 @@ class LimitStocksCollector:
             except Exception as e:
                 logger.warning(f"处理跌停股数据失败: {e}")
                 continue
+
+        # 批量获取资金流向数据
+        logger.info(f"开始获取 {len(records)} 只跌停股的资金流向数据...")
+        for i, record in enumerate(records):
+            try:
+                fund_flow = self.get_fund_flow_data(record["stock_code"], trade_date)
+                record.update(fund_flow)
+                if (i + 1) % 10 == 0:
+                    logger.info(f"已获取 {i + 1}/{len(records)} 只股票的资金流向")
+                    time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"获取 {record['stock_code']} 资金流向失败: {e}")
 
         logger.info(f"处理跌停股数据完成，共 {len(records)} 条有效记录")
         return records

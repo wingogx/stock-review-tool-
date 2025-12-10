@@ -31,6 +31,8 @@ class LimitStockItem(BaseModel):
     is_strong_limit: Optional[bool] = Field(None, description="是否一字板")
     limit_stats: Optional[str] = Field(None, description="涨停统计")
     industry: Optional[str] = Field(None, description="所属行业")
+    main_net_inflow: Optional[float] = Field(None, description="主力净流入(元)")
+    main_net_inflow_pct: Optional[float] = Field(None, description="主力净流入占比(%)")
 
     class Config:
         from_attributes = True
