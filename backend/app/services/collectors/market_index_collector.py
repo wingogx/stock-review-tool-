@@ -52,7 +52,7 @@ class MarketIndexCollector:
         self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None, max_retries: int = 3
     ) -> pd.DataFrame:
         """
-        采集指定指数的日线数据（优先Tushare，备用AKShare）
+        采集指定指数的日线数据（使用pro_bar接口，包含MA均线数据）
 
         Args:
             symbol: 指数代码 (sh000001, sz399001, sz399006)
@@ -61,7 +61,7 @@ class MarketIndexCollector:
             max_retries: 最大重试次数
 
         Returns:
-            DataFrame with columns: trade_date, open_price, high_price, low_price, close_price, volume, amount, change_pct, amplitude
+            DataFrame with columns: trade_date, open_price, high_price, low_price, close_price, volume, amount, change_pct, amplitude, ma5, ma10, ma20
         """
         for attempt in range(max_retries):
             try:
@@ -69,18 +69,23 @@ class MarketIndexCollector:
 
                 df = pd.DataFrame()
 
-                # 方法1：优先使用Tushare（数据更及时）
+                # 方法1：优先使用Tushare pro_bar（支持均线数据）
                 if self.tushare_pro and symbol in self.index_mapping:
                     try:
                         ts_code = self.index_mapping[symbol]["ts_code"]
                         start_ts = start_date.replace("-", "") if start_date else None
                         end_ts = end_date.replace("-", "") if end_date else None
 
-                        logger.debug(f"   尝试从Tushare获取 {ts_code} 数据...")
-                        df_ts = self.tushare_pro.index_daily(
+                        logger.debug(f"   尝试从Tushare pro_bar获取 {ts_code} 数据（含均线）...")
+
+                        # 使用pro_bar接口，支持ma参数获取均线
+                        df_ts = ts.pro_bar(
                             ts_code=ts_code,
+                            api=self.tushare_pro,
                             start_date=start_ts,
-                            end_date=end_ts
+                            end_date=end_ts,
+                            asset='I',  # I=指数
+                            ma=[5, 10, 20]  # 获取5/10/20日均线
                         )
 
                         if df_ts is not None and not df_ts.empty:
@@ -100,17 +105,63 @@ class MarketIndexCollector:
                             df["trade_date"] = pd.to_datetime(df["trade_date_raw"]).dt.strftime("%Y-%m-%d")
                             df = df.drop("trade_date_raw", axis=1)
 
-                            # 计算振幅
+                            # 排序（pro_bar返回的是倒序）
                             df = df.sort_values("trade_date")
+
+                            # 计算振幅
                             df["amplitude"] = (
                                 (df["high_price"] - df["low_price"]) / df["close_price"].shift(1) * 100
                             )
 
-                            logger.info(f"✅ Tushare 成功采集 {symbol} 数据，共 {len(df)} 条记录")
+                            logger.info(f"✅ Tushare pro_bar 成功采集 {symbol} 数据（含均线），共 {len(df)} 条记录")
                     except Exception as e:
-                        logger.warning(f"   Tushare获取失败: {e}，尝试备用方案...")
+                        logger.warning(f"   Tushare pro_bar获取失败: {e}，尝试备用方案...")
 
-                # 方法2：备用AKShare
+                # 方法2：备用 - 使用index_daily（不含均线，需要自己计算）
+                if df.empty and self.tushare_pro and symbol in self.index_mapping:
+                    try:
+                        ts_code = self.index_mapping[symbol]["ts_code"]
+                        start_ts = start_date.replace("-", "") if start_date else None
+                        end_ts = end_date.replace("-", "") if end_date else None
+
+                        logger.debug(f"   尝试从Tushare index_daily获取 {ts_code} 数据...")
+                        df_ts = self.tushare_pro.index_daily(
+                            ts_code=ts_code,
+                            start_date=start_ts,
+                            end_date=end_ts
+                        )
+
+                        if df_ts is not None and not df_ts.empty:
+                            df = df_ts.rename(columns={
+                                "trade_date": "trade_date_raw",
+                                "open": "open_price",
+                                "high": "high_price",
+                                "low": "low_price",
+                                "close": "close_price",
+                                "vol": "volume",
+                                "amount": "amount",
+                                "pct_chg": "change_pct",
+                            })
+
+                            df["trade_date"] = pd.to_datetime(df["trade_date_raw"]).dt.strftime("%Y-%m-%d")
+                            df = df.drop("trade_date_raw", axis=1)
+                            df = df.sort_values("trade_date")
+
+                            # 计算振幅
+                            df["amplitude"] = (
+                                (df["high_price"] - df["low_price"]) / df["close_price"].shift(1) * 100
+                            )
+
+                            # 自行计算均线
+                            df["ma5"] = df["close_price"].rolling(window=5).mean()
+                            df["ma10"] = df["close_price"].rolling(window=10).mean()
+                            df["ma20"] = df["close_price"].rolling(window=20).mean()
+
+                            logger.info(f"✅ Tushare index_daily 成功采集 {symbol} 数据，共 {len(df)} 条记录")
+                    except Exception as e:
+                        logger.warning(f"   Tushare index_daily获取失败: {e}，尝试AKShare...")
+
+                # 方法3：备用AKShare（需要自己计算均线）
                 if df.empty:
                     logger.debug(f"   使用AKShare获取 {symbol} 数据...")
                     df_ak = ak.stock_zh_index_daily(symbol=symbol)
@@ -131,6 +182,11 @@ class MarketIndexCollector:
                         df["amplitude"] = (
                             (df["high_price"] - df["low_price"]) / df["close_price"].shift(1) * 100
                         )
+
+                        # 自行计算均线
+                        df["ma5"] = df["close_price"].rolling(window=5).mean()
+                        df["ma10"] = df["close_price"].rolling(window=10).mean()
+                        df["ma20"] = df["close_price"].rolling(window=20).mean()
 
                         # 过滤日期范围
                         if start_date:
@@ -197,6 +253,9 @@ class MarketIndexCollector:
                     "amount": float(row["amount"]) if pd.notna(row["amount"]) else None,
                     "change_pct": float(row["change_pct"]) if pd.notna(row["change_pct"]) else None,
                     "amplitude": float(row["amplitude"]) if pd.notna(row["amplitude"]) else None,
+                    "ma5": round(float(row["ma5"]), 2) if "ma5" in row and pd.notna(row["ma5"]) else None,
+                    "ma10": round(float(row["ma10"]), 2) if "ma10" in row and pd.notna(row["ma10"]) else None,
+                    "ma20": round(float(row["ma20"]), 2) if "ma20" in row and pd.notna(row["ma20"]) else None,
                 }
                 records.append(record)
 

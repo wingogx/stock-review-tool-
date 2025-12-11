@@ -376,3 +376,198 @@ async def get_market_stats(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取市场统计失败: {str(e)}")
+
+
+@router.get("/index/history", summary="获取指数历史K线数据")
+async def get_index_history(
+    index_code: str = Query("SH000001", description="指数代码"),
+    days: int = Query(20, ge=5, le=60, description="查询天数")
+):
+    """
+    获取指数历史K线数据（支持走势识别）
+
+    参数:
+    - index_code: 指数代码 (SH000001=上证, SZ399001=深证, SZ399006=创业板)
+    - days: 查询天数 (5-60天)
+
+    返回:
+    - data: K线数据数组（按日期升序）
+    - trend_analysis: 走势分析
+      - trend: 震荡/上涨/下跌
+      - ma5_position: 当前价格与MA5关系
+      - ma10_position: 当前价格与MA10关系
+      - ma20_position: 当前价格与MA20关系
+      - description: 走势描述
+    """
+    try:
+        supabase = get_supabase()
+
+        # 查询最近N天数据
+        response = supabase.table("market_index")\
+            .select("*")\
+            .eq("index_code", index_code)\
+            .order("trade_date", desc=True)\
+            .limit(days)\
+            .execute()
+
+        if not response.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"未找到指数 {index_code} 的数据"
+            )
+
+        # 按日期升序排列（K线图需要从旧到新）
+        data = sorted(response.data, key=lambda x: x['trade_date'])
+
+        # 走势识别算法
+        trend_analysis = analyze_trend(data)
+
+        return {
+            "success": True,
+            "data": data,
+            "total": len(data),
+            "trend_analysis": trend_analysis
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取指数历史数据失败: {str(e)}")
+
+
+def analyze_trend(kline_data: list) -> dict:
+    """
+    分析指数走势（震荡/上涨/下跌）
+
+    算法逻辑:
+    1. 计算MA5, MA10, MA20（根据可用数据调整）
+    2. 判断当前价格与均线位置关系
+    3. 计算近期涨跌幅
+    4. 综合判断走势
+
+    走势判断:
+    - 上涨: 价格 > MA5 > MA10 且近5日涨幅 > 2%
+    - 下跌: 价格 < MA5 < MA10 且近5日跌幅 > 2%
+    - 震荡: 其他情况
+    """
+    if len(kline_data) < 7:
+        return {
+            "trend": "数据不足",
+            "description": f"历史数据仅{len(kline_data)}天，至少需要7天数据"
+        }
+
+    # 获取最新数据
+    latest = kline_data[-1]
+    close_price = latest['close_price']
+
+    # 计算MA5, MA10, MA20（使用最近的数据）
+    closes = [item['close_price'] for item in kline_data]
+
+    ma5 = sum(closes[-5:]) / 5 if len(closes) >= 5 else None
+    ma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else None
+    ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else None
+
+    # 计算近5日涨跌幅
+    if len(kline_data) >= 6:
+        price_5days_ago = kline_data[-6]['close_price']
+        change_5d = ((close_price - price_5days_ago) / price_5days_ago) * 100
+    else:
+        change_5d = 0
+
+    # 判断价格与均线位置
+    ma5_position = "above" if (ma5 and close_price > ma5) else "below"
+    ma10_position = "above" if (ma10 and close_price > ma10) else "below"
+    ma20_position = "above" if (ma20 and close_price > ma20) else "below"
+
+    # 判断均线排列（需要所有均线都存在）
+    ma_aligned_up = (ma5 and ma10 and ma20 and ma5 > ma10 > ma20)  # 多头排列
+    ma_aligned_down = (ma5 and ma10 and ma20 and ma5 < ma10 < ma20)  # 空头排列
+
+    # 综合判断走势（根据可用数据调整判断条件）
+    if ma20:  # 有20天数据，使用完整判断
+        if close_price > ma5 and ma_aligned_up and change_5d > 2:
+            trend = "上涨"
+            description = f"多头排列，价格站上MA5，近5日涨{change_5d:.2f}%"
+        elif close_price < ma5 and ma_aligned_down and change_5d < -2:
+            trend = "下跌"
+            description = f"空头排列，价格跌破MA5，近5日跌{abs(change_5d):.2f}%"
+        else:
+            trend = "震荡"
+            if abs(change_5d) < 2:
+                description = f"横盘整理，近5日涨跌幅{change_5d:.2f}%，波动较小"
+            elif close_price > ma5 and close_price < ma10:
+                description = f"短期偏强，价格在MA5和MA10之间震荡"
+            elif close_price < ma5 and close_price > ma10:
+                description = f"短期偏弱，价格在MA5和MA10之间震荡"
+            else:
+                description = f"区间震荡，均线未形成明确排列"
+    else:  # 数据不足20天，使用简化判断（仅MA5和MA10）
+        if ma10 and close_price > ma5 > ma10 and change_5d > 2:
+            trend = "上涨"
+            description = f"价格站上MA5和MA10，近5日涨{change_5d:.2f}%（数据有限，仅供参考）"
+        elif ma10 and close_price < ma5 < ma10 and change_5d < -2:
+            trend = "下跌"
+            description = f"价格跌破MA5和MA10，近5日跌{abs(change_5d):.2f}%（数据有限，仅供参考）"
+        else:
+            trend = "震荡"
+            if abs(change_5d) < 2:
+                description = f"横盘整理，近5日涨跌幅{change_5d:.2f}%（数据有限，仅供参考）"
+            else:
+                description = f"区间震荡，近5日涨跌幅{change_5d:.2f}%（数据有限，仅供参考）"
+
+    return {
+        "trend": trend,
+        "ma5": round(ma5, 2) if ma5 else None,
+        "ma10": round(ma10, 2) if ma10 else None,
+        "ma20": round(ma20, 2) if ma20 else None,
+        "current_price": round(close_price, 2),
+        "change_5d": round(change_5d, 2),
+        "ma5_position": ma5_position,
+        "ma10_position": ma10_position,
+        "ma20_position": ma20_position,
+        "description": description
+    }
+
+
+@router.get("/sentiment/history", summary="获取历史市场情绪数据")
+async def get_sentiment_history(
+    days: int = Query(60, ge=5, le=120, description="查询天数")
+):
+    """
+    获取历史市场情绪数据（用于成交额趋势图等）
+
+    参数:
+    - days: 查询天数 (5-120天)
+
+    返回:
+    - data: 历史数据数组（按日期升序）
+    """
+    try:
+        supabase = get_supabase()
+
+        # 查询最近N天数据
+        response = supabase.table("market_sentiment")\
+            .select("trade_date,total_amount,up_count,down_count,limit_up_count,limit_down_count")\
+            .order("trade_date", desc=True)\
+            .limit(days)\
+            .execute()
+
+        if not response.data:
+            raise HTTPException(
+                status_code=404,
+                detail="未找到市场情绪历史数据"
+            )
+
+        # 按日期升序排列
+        data = sorted(response.data, key=lambda x: x['trade_date'])
+
+        return {
+            "success": True,
+            "data": data,
+            "total": len(data)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取市场情绪历史数据失败: {str(e)}")
