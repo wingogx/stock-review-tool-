@@ -1,11 +1,13 @@
 """
 大盘指数数据采集服务
-使用 AKShare 采集上证、深证、创业板指数数据
+优先使用 Tushare 采集指数数据（更及时），AKShare作为备用
 """
 
 import akshare as ak
+import tushare as ts
 import pandas as pd
 import time
+import os
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from loguru import logger
@@ -18,18 +20,39 @@ class MarketIndexCollector:
 
     def __init__(self):
         self.supabase = get_supabase()
+        self._tushare_pro = None
         # 指数代码映射
         self.index_mapping = {
-            "sh000001": {"code": "SH000001", "name": "上证指数"},
-            "sz399001": {"code": "SZ399001", "name": "深证成指"},
-            "sz399006": {"code": "SZ399006", "name": "创业板指"},
+            "sh000001": {"code": "SH000001", "name": "上证指数", "ts_code": "000001.SH"},
+            "sz399001": {"code": "SZ399001", "name": "深证成指", "ts_code": "399001.SZ"},
+            "sz399006": {"code": "SZ399006", "name": "创业板指", "ts_code": "399006.SZ"},
         }
+
+    @property
+    def tushare_pro(self):
+        """延迟初始化 Tushare Pro API"""
+        if self._tushare_pro is None:
+            token = os.getenv("TUSHARE_TOKEN")
+            if token:
+                try:
+                    http_url = os.getenv("TUSHARE_HTTP_URL")
+                    if http_url:
+                        self._tushare_pro = ts.pro_api()
+                        self._tushare_pro._DataApi__token = token
+                        self._tushare_pro._DataApi__http_url = http_url
+                        logger.debug(f"✅ Tushare Pro API 初始化成功（高级账号）")
+                    else:
+                        self._tushare_pro = ts.pro_api(token)
+                        logger.debug("✅ Tushare Pro API 初始化成功（标准账号）")
+                except Exception as e:
+                    logger.warning(f"Tushare Pro 初始化失败: {e}")
+        return self._tushare_pro
 
     def collect_index_daily(
         self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None, max_retries: int = 3
     ) -> pd.DataFrame:
         """
-        采集指定指数的日线数据
+        采集指定指数的日线数据（优先Tushare，备用AKShare）
 
         Args:
             symbol: 指数代码 (sh000001, sz399001, sz399006)
@@ -38,58 +61,95 @@ class MarketIndexCollector:
             max_retries: 最大重试次数
 
         Returns:
-            DataFrame with columns: date, open, high, low, close, volume, amount
+            DataFrame with columns: trade_date, open_price, high_price, low_price, close_price, volume, amount, change_pct, amplitude
         """
         for attempt in range(max_retries):
             try:
                 logger.info(f"开始采集指数 {symbol} 的数据... (尝试 {attempt + 1}/{max_retries})")
 
-                # 使用新浪接口获取指数日线数据（稳定可靠，数据更新通常在18:30前完成）
-                df = ak.stock_zh_index_daily(symbol=symbol)
+                df = pd.DataFrame()
 
-                if df is None or df.empty:
+                # 方法1：优先使用Tushare（数据更及时）
+                if self.tushare_pro and symbol in self.index_mapping:
+                    try:
+                        ts_code = self.index_mapping[symbol]["ts_code"]
+                        start_ts = start_date.replace("-", "") if start_date else None
+                        end_ts = end_date.replace("-", "") if end_date else None
+
+                        logger.debug(f"   尝试从Tushare获取 {ts_code} 数据...")
+                        df_ts = self.tushare_pro.index_daily(
+                            ts_code=ts_code,
+                            start_date=start_ts,
+                            end_date=end_ts
+                        )
+
+                        if df_ts is not None and not df_ts.empty:
+                            # 重命名列
+                            df = df_ts.rename(columns={
+                                "trade_date": "trade_date_raw",
+                                "open": "open_price",
+                                "high": "high_price",
+                                "low": "low_price",
+                                "close": "close_price",
+                                "vol": "volume",
+                                "amount": "amount",
+                                "pct_chg": "change_pct",
+                            })
+
+                            # 格式化日期
+                            df["trade_date"] = pd.to_datetime(df["trade_date_raw"]).dt.strftime("%Y-%m-%d")
+                            df = df.drop("trade_date_raw", axis=1)
+
+                            # 计算振幅
+                            df = df.sort_values("trade_date")
+                            df["amplitude"] = (
+                                (df["high_price"] - df["low_price"]) / df["close_price"].shift(1) * 100
+                            )
+
+                            logger.info(f"✅ Tushare 成功采集 {symbol} 数据，共 {len(df)} 条记录")
+                    except Exception as e:
+                        logger.warning(f"   Tushare获取失败: {e}，尝试备用方案...")
+
+                # 方法2：备用AKShare
+                if df.empty:
+                    logger.debug(f"   使用AKShare获取 {symbol} 数据...")
+                    df_ak = ak.stock_zh_index_daily(symbol=symbol)
+
+                    if df_ak is not None and not df_ak.empty:
+                        df = df_ak.rename(columns={
+                            "date": "trade_date",
+                            "open": "open_price",
+                            "high": "high_price",
+                            "low": "low_price",
+                            "close": "close_price",
+                            "volume": "volume",
+                        })
+
+                        df["amount"] = None
+                        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
+                        df["change_pct"] = df["close_price"].pct_change() * 100
+                        df["amplitude"] = (
+                            (df["high_price"] - df["low_price"]) / df["close_price"].shift(1) * 100
+                        )
+
+                        # 过滤日期范围
+                        if start_date:
+                            df = df[df["trade_date"] >= start_date]
+                        if end_date:
+                            df = df[df["trade_date"] <= end_date]
+
+                        logger.info(f"✅ AKShare 成功采集 {symbol} 数据，共 {len(df)} 条记录")
+
+                if df.empty:
                     logger.warning(f"指数 {symbol} 没有数据")
                     return pd.DataFrame()
 
-                # 重命名列（新浪接口没有amount字段）
-                df = df.rename(
-                    columns={
-                        "date": "trade_date",
-                        "open": "open_price",
-                        "high": "high_price",
-                        "low": "low_price",
-                        "close": "close_price",
-                        "volume": "volume",
-                    }
-                )
-
-                # 添加amount字段为None（保持数据结构一致性）
-                df["amount"] = None
-
-                # 确保日期格式正确
-                df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
-
-                # 计算涨跌幅
-                df["change_pct"] = df["close_price"].pct_change() * 100
-
-                # 计算振幅
-                df["amplitude"] = (
-                    (df["high_price"] - df["low_price"]) / df["close_price"].shift(1) * 100
-                )
-
-                # 过滤日期范围（确保精确匹配）
-                if start_date:
-                    df = df[df["trade_date"] >= start_date]
-                if end_date:
-                    df = df[df["trade_date"] <= end_date]
-
-                logger.info(f"成功采集 {symbol} 数据，共 {len(df)} 条记录")
                 return df
 
             except Exception as e:
                 logger.warning(f"采集指数 {symbol} 数据失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
                 if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 2  # 指数退避：2秒、4秒、6秒
+                    wait_time = (attempt + 1) * 2
                     logger.info(f"等待 {wait_time} 秒后重试...")
                     time.sleep(wait_time)
                 else:

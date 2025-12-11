@@ -92,7 +92,7 @@ def collect_all_data(trade_date: str):
         logger.info("\n" + "=" * 60)
         logger.info("🔥 采集热门概念板块数据...")
         collector = HotConceptsCollector()
-        count = collector.collect_and_save(trade_date=trade_date, top_n=50)
+        count = collector.collect_and_save(trade_date=trade_date, top_n=10)  # Top 10，按5日涨幅排序
         logger.info(f"✅ 热门概念采集完成: 保存了 {count} 个概念")
         results["hot_concepts"] = True
     except Exception as e:

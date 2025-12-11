@@ -12,12 +12,13 @@ from loguru import logger
 
 def get_latest_trading_date() -> str:
     """
-    获取最近的交易日期（从AKShare API）
+    获取最近的交易日期（综合多数据源）
 
     逻辑:
-    1. 使用上证指数历史数据获取最近交易日
-    2. 取最后一条记录的日期作为最近交易日
-    3. 如果失败，回退到系统当前日期
+    1. 从数据库获取已有数据的最新日期（最可靠）
+    2. 从AKShare上证指数获取最近交易日
+    3. 取两者中最新的日期
+    4. 如果都失败，回退到系统当前日期
 
     Returns:
         最近交易日期 YYYY-MM-DD
@@ -26,23 +27,49 @@ def get_latest_trading_date() -> str:
     - 在非交易日（周末/节假日）运行采集器时，自动获取上一个交易日的日期
     - 确保数据库中保存的是实际的交易日期，而不是系统当前日期
     """
+    latest_dates = []
+
+    # 方法1: 从数据库获取最新日期（优先）
     try:
-        # 使用上证指数获取最近交易日
-        # 只获取最近几天的数据即可
+        from app.utils.supabase_client import get_supabase
+        supabase = get_supabase()
+
+        # 检查多个表的最新日期
+        tables_to_check = ['hot_concepts', 'market_sentiment', 'limit_stocks_detail']
+        for table in tables_to_check:
+            try:
+                result = supabase.table(table).select('trade_date').order('trade_date', desc=True).limit(1).execute()
+                if result.data:
+                    db_date = result.data[0]['trade_date']
+                    latest_dates.append(db_date)
+                    logger.debug(f"从 {table} 表获取最新日期: {db_date}")
+            except Exception as e:
+                logger.debug(f"从 {table} 表获取日期失败: {e}")
+
+    except Exception as e:
+        logger.debug(f"数据库查询失败: {e}")
+
+    # 方法2: 从AKShare获取最近交易日
+    try:
         df = ak.stock_zh_index_daily(symbol="sh000001")
 
         if df is not None and not df.empty:
-            # 取最后一条记录的日期
-            latest_date = pd.to_datetime(df['date'].iloc[-1]).strftime("%Y-%m-%d")
-            logger.debug(f"从上证指数获取最近交易日: {latest_date}")
-            return latest_date
+            akshare_date = pd.to_datetime(df['date'].iloc[-1]).strftime("%Y-%m-%d")
+            latest_dates.append(akshare_date)
+            logger.debug(f"从上证指数获取最近交易日: {akshare_date}")
 
     except Exception as e:
-        logger.warning(f"获取最近交易日失败: {e}，使用系统当前日期")
+        logger.debug(f"AKShare获取交易日失败: {e}")
+
+    # 取所有来源中最新的日期
+    if latest_dates:
+        latest_date = max(latest_dates)
+        logger.debug(f"最终确定最近交易日: {latest_date}")
+        return latest_date
 
     # 回退方案：使用系统当前日期
     fallback_date = datetime.now().strftime("%Y-%m-%d")
-    logger.debug(f"使用系统当前日期作为交易日: {fallback_date}")
+    logger.warning(f"所有数据源都失败，使用系统当前日期: {fallback_date}")
     return fallback_date
 
 

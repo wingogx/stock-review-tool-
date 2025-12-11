@@ -1,20 +1,23 @@
 """
 涨停池/跌停池数据采集服务
-使用 AKShare 采集涨停和跌停个股的详细信息
+优先使用 Tushare limit_list_ths 采集涨停和跌停个股的详细信息
 
 数据来源:
-- stock_zt_pool_em: 涨停股池（真实数据）
-- stock_zt_pool_dtgc_em: 跌停股池（真实数据）
+- limit_list_ths: Tushare涨停池（高级账号，10000积分）
+- stock_zt_pool_em: AKShare涨停股池（备用）
+- stock_zt_pool_dtgc_em: AKShare跌停股池（备用）
 - stock_individual_fund_flow: 个股资金流向（主力/散户净流入）
-包含: 股票代码、名称、涨跌幅、封板时间、连板天数、开板次数、封单金额等
+包含: 股票代码、名称、涨跌幅、封板时间、连板天数、开板次数、封单金额、概念板块等
 """
 
 import akshare as ak
 import pandas as pd
+import tushare as ts
 from datetime import datetime
 from typing import Optional, List, Dict
 from loguru import logger
 import time
+import os
 
 from app.utils.supabase_client import get_supabase
 from app.utils.trading_date import get_latest_trading_date
@@ -26,6 +29,32 @@ class LimitStocksCollector:
     def __init__(self):
         self.supabase = get_supabase()
         self._fund_flow_cache = {}  # 缓存资金流向数据
+        self._concept_cache = {}  # 缓存股票概念数据
+        self._tushare_pro = None  # Tushare Pro API实例
+
+    @property
+    def tushare_pro(self):
+        """延迟初始化 Tushare Pro API"""
+        if self._tushare_pro is None:
+            token = os.getenv("TUSHARE_TOKEN")
+            if token:
+                try:
+                    http_url = os.getenv("TUSHARE_HTTP_URL")
+                    if http_url:
+                        # 使用自定义HTTP URL（高级账号）
+                        self._tushare_pro = ts.pro_api()
+                        # 手动设置token和http_url
+                        self._tushare_pro._DataApi__token = token
+                        self._tushare_pro._DataApi__http_url = http_url
+                        logger.info(f"✅ Tushare Pro API 初始化成功（高级账号）: {http_url}")
+                    else:
+                        # 使用默认API地址
+                        self._tushare_pro = ts.pro_api(token)
+                        logger.info("✅ Tushare Pro API 初始化成功（标准账号）")
+                except Exception as e:
+                    logger.warning(f"Tushare Pro 初始化失败: {e}")
+
+        return self._tushare_pro
 
     def get_fund_flow_data(self, stock_code: str, trade_date: str) -> Dict:
         """
@@ -71,9 +100,45 @@ class LimitStocksCollector:
         self._fund_flow_cache[cache_key] = result
         return result
 
+    def get_stock_concepts(self, ts_code: str) -> List[str]:
+        """
+        获取股票所属的概念板块（使用Tushare concept_detail接口）
+
+        Args:
+            ts_code: 股票代码（带交易所后缀，如 000035.SZ）
+
+        Returns:
+            概念板块名称列表
+        """
+        # 缓存检查
+        if ts_code in self._concept_cache:
+            return self._concept_cache[ts_code]
+
+        concepts = []
+
+        try:
+            if self.tushare_pro:
+                time.sleep(0.1)  # 避免频率限制
+                df = self.tushare_pro.concept_detail(ts_code=ts_code)
+
+                if df is not None and not df.empty:
+                    concepts = df['concept_name'].tolist()
+                    logger.debug(f"   {ts_code} 获取到 {len(concepts)} 个概念")
+                else:
+                    logger.debug(f"   {ts_code} 无概念数据")
+            else:
+                logger.debug("   Tushare Pro API 未初始化，无法获取概念")
+
+        except Exception as e:
+            logger.debug(f"   获取 {ts_code} 概念失败: {e}")
+
+        # 缓存结果
+        self._concept_cache[ts_code] = concepts
+        return concepts
+
     def collect_limit_up_stocks(self, date: Optional[str] = None) -> pd.DataFrame:
         """
-        采集涨停股池详细数据（真实数据）
+        采集涨停股池详细数据（优先使用Tushare）
 
         Args:
             date: 日期 YYYYMMDD，默认为今天
@@ -81,30 +146,50 @@ class LimitStocksCollector:
         Returns:
             DataFrame with limit-up stocks details
         """
-        try:
-            date_str = date or datetime.now().strftime("%Y%m%d")
-            logger.info(f"采集 {date_str} 涨停股池数据...")
+        date_str = date or datetime.now().strftime("%Y%m%d")
+        logger.info(f"采集 {date_str} 涨停股池数据...")
 
+        # 方法1: 优先从 Tushare limit_list_d 获取（更稳定，包含连板数据）
+        if self.tushare_pro:
+            try:
+                logger.info("   尝试从 Tushare limit_list_d 获取涨停池数据...")
+                time.sleep(0.3)  # 避免频率限制
+
+                df = self.tushare_pro.limit_list_d(
+                    trade_date=date_str,
+                    limit_type='U'
+                )
+
+                if df is not None and not df.empty:
+                    logger.info(f"✅ Tushare 成功采集涨停股池，共 {len(df)} 只股票")
+                    logger.debug(f"   Tushare涨停池列名: {df.columns.tolist()}")
+                    return df
+                else:
+                    logger.warning("   Tushare 涨停池数据为空，尝试备用方案...")
+            except Exception as e:
+                logger.warning(f"   Tushare 采集涨停池失败: {e}，尝试备用方案...")
+
+        # 方法2: 从 AKShare 获取（备用方案）
+        try:
+            logger.info("   尝试从 AKShare 获取涨停股池数据...")
             df = ak.stock_zt_pool_em(date=date_str)
 
             if df is None or df.empty:
-                logger.warning(f"{date_str} 涨停股池数据为空")
+                logger.warning(f"{date_str} AKShare涨停股池数据为空")
                 return pd.DataFrame()
 
-            logger.info(f"成功采集涨停股池，共 {len(df)} 只股票")
-
-            # 显示列名以便调试
-            logger.debug(f"涨停股池列名: {df.columns.tolist()}")
+            logger.info(f"✅ AKShare 成功采集涨停股池，共 {len(df)} 只股票")
+            logger.debug(f"   AKShare涨停池列名: {df.columns.tolist()}")
 
             return df
 
         except Exception as e:
-            logger.error(f"采集涨停股池失败: {str(e)}")
+            logger.error(f"❌ AKShare 采集涨停股池失败: {str(e)}")
             return pd.DataFrame()
 
     def collect_limit_down_stocks(self, date: Optional[str] = None) -> pd.DataFrame:
         """
-        采集跌停股池详细数据（真实数据）
+        采集跌停股池详细数据（优先使用Tushare）
 
         Args:
             date: 日期 YYYYMMDD，默认为今天
@@ -112,30 +197,50 @@ class LimitStocksCollector:
         Returns:
             DataFrame with limit-down stocks details
         """
-        try:
-            date_str = date or datetime.now().strftime("%Y%m%d")
-            logger.info(f"采集 {date_str} 跌停股池数据...")
+        date_str = date or datetime.now().strftime("%Y%m%d")
+        logger.info(f"采集 {date_str} 跌停股池数据...")
 
+        # 方法1: 优先从 Tushare limit_list_d 获取（更稳定，包含连板数据）
+        if self.tushare_pro:
+            try:
+                logger.info("   尝试从 Tushare limit_list_d 获取跌停池数据...")
+                time.sleep(0.3)  # 避免频率限制
+
+                df = self.tushare_pro.limit_list_d(
+                    trade_date=date_str,
+                    limit_type='D'
+                )
+
+                if df is not None and not df.empty:
+                    logger.info(f"✅ Tushare 成功采集跌停股池，共 {len(df)} 只股票")
+                    logger.debug(f"   Tushare跌停池列名: {df.columns.tolist()}")
+                    return df
+                else:
+                    logger.warning("   Tushare 跌停池数据为空，尝试备用方案...")
+            except Exception as e:
+                logger.warning(f"   Tushare 采集跌停池失败: {e}，尝试备用方案...")
+
+        # 方法2: 从 AKShare 获取（备用方案）
+        try:
+            logger.info("   尝试从 AKShare 获取跌停股池数据...")
             df = ak.stock_zt_pool_dtgc_em(date=date_str)
 
             if df is None or df.empty:
-                logger.warning(f"{date_str} 跌停股池数据为空")
+                logger.warning(f"{date_str} AKShare跌停股池数据为空")
                 return pd.DataFrame()
 
-            logger.info(f"成功采集跌停股池，共 {len(df)} 只股票")
-
-            # 显示列名以便调试
-            logger.debug(f"跌停股池列名: {df.columns.tolist()}")
+            logger.info(f"✅ AKShare 成功采集跌停股池，共 {len(df)} 只股票")
+            logger.debug(f"   AKShare跌停池列名: {df.columns.tolist()}")
 
             return df
 
         except Exception as e:
-            logger.error(f"采集跌停股池失败: {str(e)}")
+            logger.error(f"❌ AKShare 采集跌停股池失败: {str(e)}")
             return pd.DataFrame()
 
     def process_limit_up_data(self, df: pd.DataFrame, trade_date: str) -> List[Dict]:
         """
-        处理涨停股池数据，转换为数据库格式
+        处理涨停股池数据，转换为数据库格式（支持Tushare和AKShare）
 
         Args:
             df: 涨停股池 DataFrame
@@ -149,69 +254,167 @@ class LimitStocksCollector:
 
         records = []
 
-        # 列名映射（处理可能的不同列名）
-        column_mapping = {
-            "代码": "stock_code",
-            "股票代码": "stock_code",
-            "名称": "stock_name",
-            "股票名称": "stock_name",
-            "涨跌幅": "change_pct",
-            "最新价": "close_price",
-            "现价": "close_price",
-            "收盘价": "close_price",
-            "换手率": "turnover_rate",
-            "成交额": "amount",
-            "首次封板时间": "first_limit_time",
-            "最后封板时间": "last_limit_time",
-            "封板时间": "first_limit_time",
-            "连板数": "continuous_days",
-            "打开次数": "opening_times",
-            "开板次数": "opening_times",
-            "炸板次数": "opening_times",
-            "封单金额": "sealed_amount",
-            "封板资金": "sealed_amount",
-            "总市值": "market_cap",
-            "流通市值": "circulation_market_cap",
-            "涨停统计": "limit_stats",
-            "所属行业": "industry",
-        }
+        # 检测数据来源（Tushare vs AKShare）
+        is_tushare = 'ts_code' in df.columns
+
+        # 列名映射（处理Tushare和AKShare的不同列名）
+        if is_tushare:
+            # Tushare limit_list_d 列名映射
+            column_mapping = {
+                "ts_code": "stock_code",
+                "name": "stock_name",
+                "pct_chg": "change_pct",
+                "close": "close_price",
+                # "trade_date": 不映射，使用参数传入的trade_date
+                "fd_amount": "sealed_amount",
+                "first_time": "first_limit_time",
+                "last_time": "last_limit_time",
+                "open_times": "opening_times",
+                "up_stat": "limit_stats",  # 涨停统计，格式 "1/1" (当前连板/历史最大连板)
+                "limit_times": "continuous_days",  # 连板数
+                "lu_desc": "lu_desc",  # 涨停原因/概念板块
+                "amount": "amount",
+                "total_mv": "market_cap",
+                "float_mv": "circulation_market_cap",  # 流通市值
+                "turnover_ratio": "turnover_rate",  # 换手率
+                "industry": "industry",  # 所属行业
+            }
+            logger.debug("   使用Tushare列名映射处理数据")
+        else:
+            # AKShare 列名映射
+            column_mapping = {
+                "代码": "stock_code",
+                "股票代码": "stock_code",
+                "名称": "stock_name",
+                "股票名称": "stock_name",
+                "涨跌幅": "change_pct",
+                "最新价": "close_price",
+                "现价": "close_price",
+                "收盘价": "close_price",
+                "换手率": "turnover_rate",
+                "成交额": "amount",
+                "首次封板时间": "first_limit_time",
+                "最后封板时间": "last_limit_time",
+                "封板时间": "first_limit_time",
+                "连板数": "continuous_days",
+                "打开次数": "opening_times",
+                "开板次数": "opening_times",
+                "炸板次数": "opening_times",
+                "封单金额": "sealed_amount",
+                "封板资金": "sealed_amount",
+                "总市值": "market_cap",
+                "流通市值": "circulation_market_cap",
+                "涨停统计": "limit_stats",
+                "所属行业": "industry",
+                "所属概念": "concepts_str",  # AKShare的概念字段
+            }
+            logger.debug("   使用AKShare列名映射处理数据")
 
         for _, row in df.iterrows():
             try:
+                # 获取股票名称，检查是否为ST股票
+                stock_name = None
+                if "name" in df.columns:  # Tushare
+                    stock_name = str(row["name"])
+                elif "名称" in df.columns:  # AKShare
+                    stock_name = str(row["名称"])
+                elif "股票名称" in df.columns:  # AKShare
+                    stock_name = str(row["股票名称"])
+
+                # 排除ST股票（包括ST、*ST、S*ST等）
+                if stock_name and ("ST" in stock_name.upper()):
+                    logger.debug(f"   跳过ST股票: {stock_name}")
+                    continue
+
                 record = {
                     "trade_date": trade_date,
                     "limit_type": "limit_up",
                 }
 
                 # 处理各字段
-                for ak_col, db_col in column_mapping.items():
-                    if ak_col in df.columns:
-                        value = row[ak_col]
+                for source_col, db_col in column_mapping.items():
+                    if source_col in df.columns:
+                        value = row[source_col]
 
                         # 处理不同类型的值
                         if pd.isna(value):
                             record[db_col] = None
-                        elif db_col in ["stock_code", "stock_name", "limit_stats", "industry"]:
+                        elif db_col == "stock_code":
+                            # 处理股票代码
+                            if is_tushare:
+                                # Tushare: 去除交易所后缀 (000001.SZ -> 000001)
+                                code_str = str(value).split('.')[0]
+                                record[db_col] = code_str
+                            else:
+                                # AKShare: 直接使用6位代码
+                                record[db_col] = str(value)
+                        elif db_col == "lu_desc":
+                            # Tushare专有：涨停原因/概念板块描述
+                            record[db_col] = str(value) if value else None
+                        elif db_col in ["stock_name", "limit_stats", "industry", "concepts_str"]:
                             record[db_col] = str(value)
                         elif db_col in ["first_limit_time", "last_limit_time"]:
                             # 时间格式处理
                             if value and value != "-":
                                 try:
-                                    # 可能的格式: "09:30:00", "09:30", "093000"
+                                    # 可能的格式: "09:30:00", "09:30", "093000", "94539" (5位数字HMMSS)
                                     time_str = str(value).strip()
-                                    if len(time_str) == 6:  # 093000
-                                        time_str = f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:6]}"
-                                    elif len(time_str) == 5:  # 09:30
-                                        time_str = f"{time_str}:00"
-                                    record[db_col] = time_str
-                                except:
+
+                                    # 检查是否已经是标准格式 HH:MM:SS
+                                    if ':' in time_str and len(time_str.split(':')) == 3:
+                                        # 验证时间合法性
+                                        parts = time_str.split(':')
+                                        hour = int(parts[0])
+                                        minute = int(parts[1])
+                                        second = int(parts[2])
+                                        if 0 <= hour < 24 and 0 <= minute < 60 and 0 <= second < 60:
+                                            record[db_col] = time_str
+                                        else:
+                                            record[db_col] = None
+                                    elif len(time_str) == 6 and time_str.isdigit():  # 093000 (HHMMSS)
+                                        hour = int(time_str[:2])
+                                        minute = int(time_str[2:4])
+                                        second = int(time_str[4:6])
+                                        if 0 <= hour < 24 and 0 <= minute < 60 and 0 <= second < 60:
+                                            record[db_col] = f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:6]}"
+                                        else:
+                                            record[db_col] = None
+                                    elif len(time_str) == 5 and time_str.isdigit():  # 94539 (HMMSS，9点45分39秒)
+                                        hour = int(time_str[0])  # 单个数字，如9
+                                        minute = int(time_str[1:3])
+                                        second = int(time_str[3:5])
+                                        if 0 <= hour < 24 and 0 <= minute < 60 and 0 <= second < 60:
+                                            record[db_col] = f"{hour:02d}:{minute:02d}:{second:02d}"
+                                        else:
+                                            record[db_col] = None
+                                    elif len(time_str) == 5 and ':' in time_str:  # 09:30
+                                        hour = int(time_str[:2])
+                                        minute = int(time_str[3:5])
+                                        if 0 <= hour < 24 and 0 <= minute < 60:
+                                            record[db_col] = f"{time_str}:00"
+                                        else:
+                                            record[db_col] = None
+                                    else:
+                                        # 无法识别的格式，设为None
+                                        logger.debug(f"   无效时间格式: {value}")
+                                        record[db_col] = None
+                                except Exception as e:
+                                    logger.debug(f"   解析时间 {db_col} 失败: {value}, 错误: {e}")
                                     record[db_col] = None
                             else:
                                 record[db_col] = None
                         elif db_col in ["continuous_days", "opening_times"]:
                             try:
-                                record[db_col] = int(value) if value and value != "-" else 0
-                            except:
+                                if value and value != "-":
+                                    # 处理 up_stat 字段格式 "1/1" (当前连板/历史最大连板)
+                                    if isinstance(value, str) and '/' in value:
+                                        record[db_col] = int(value.split('/')[0])
+                                    else:
+                                        record[db_col] = int(value)
+                                else:
+                                    record[db_col] = 0
+                            except Exception as e:
+                                logger.debug(f"   解析 {db_col} 失败: {value}, 错误: {e}")
                                 record[db_col] = 0
                         else:
                             try:
@@ -219,17 +422,29 @@ class LimitStocksCollector:
                             except:
                                 record[db_col] = None
 
-                # 处理概念字段（如果存在）
-                if "所属概念" in df.columns:
-                    concepts_str = row["所属概念"]
-                    if pd.notna(concepts_str) and concepts_str:
-                        # 分割概念（可能用逗号、分号等分隔）
-                        concepts = [c.strip() for c in str(concepts_str).replace("；", ",").split(",") if c.strip()]
-                        record["concepts"] = concepts[:5]  # 最多保存5个概念
-                    else:
-                        record["concepts"] = []
-                else:
-                    record["concepts"] = []
+                # 处理概念字段（Tushare的lu_desc或AKShare的所属概念）
+                concepts = []
+                if is_tushare and "lu_desc" in record and record["lu_desc"]:
+                    # Tushare: 解析 lu_desc 字段（格式："概念1+概念2+概念3"）
+                    lu_desc = record["lu_desc"]
+                    concepts = [c.strip() for c in lu_desc.split('+') if c.strip()]
+                    logger.debug(f"   Tushare解析概念: {concepts}")
+                elif is_tushare and "ts_code" in df.columns:
+                    # Tushare: 如果没有lu_desc字段，使用concept_detail接口获取概念
+                    ts_code = row["ts_code"]
+                    concepts = self.get_stock_concepts(ts_code)
+                elif "concepts_str" in record and record["concepts_str"]:
+                    # AKShare: 解析"所属概念"字段（格式："概念1,概念2"或"概念1；概念2"）
+                    concepts_str = record["concepts_str"]
+                    concepts = [c.strip() for c in str(concepts_str).replace("；", ",").split(",") if c.strip()]
+                    logger.debug(f"   AKShare解析概念: {concepts}")
+
+                # 保存概念数组（最多5个）
+                record["concepts"] = concepts[:5]
+
+                # 清理中间字段（lu_desc和concepts_str不保存到数据库）
+                record.pop("lu_desc", None)
+                record.pop("concepts_str", None)
 
                 # 判断是否一字板：炸板次数为0 且 首次封板时间 <= 09:30:00
                 opening_times = record.get("opening_times")
@@ -276,7 +491,7 @@ class LimitStocksCollector:
 
     def process_limit_down_data(self, df: pd.DataFrame, trade_date: str) -> List[Dict]:
         """
-        处理跌停股池数据，转换为数据库格式
+        处理跌停股池数据，转换为数据库格式（支持Tushare和AKShare）
 
         Args:
             df: 跌停股池 DataFrame
@@ -290,31 +505,76 @@ class LimitStocksCollector:
 
         records = []
 
-        # 列名映射
-        column_mapping = {
-            "代码": "stock_code",
-            "名称": "stock_name",
-            "涨跌幅": "change_pct",
-            "最新价": "close_price",
-            "换手率": "turnover_rate",
-            "成交额": "amount",
-            "总市值": "market_cap",
-            "流通市值": "circulation_market_cap",
-        }
+        # 检测数据来源（Tushare vs AKShare）
+        is_tushare = 'ts_code' in df.columns
+
+        # 列名映射（处理Tushare和AKShare的不同列名）
+        if is_tushare:
+            # Tushare limit_list_ths 列名映射
+            column_mapping = {
+                "ts_code": "stock_code",
+                "name": "stock_name",
+                "pct_chg": "change_pct",
+                "close": "close_price",
+                # "trade_date": 不映射，使用参数传入的trade_date
+                "amount": "amount",
+                "total_mv": "market_cap",
+                "circ_mv": "circulation_market_cap",
+                "lu_desc": "lu_desc",  # 跌停原因/概念板块
+            }
+            logger.debug("   使用Tushare列名映射处理跌停数据")
+        else:
+            # AKShare 列名映射
+            column_mapping = {
+                "代码": "stock_code",
+                "名称": "stock_name",
+                "涨跌幅": "change_pct",
+                "最新价": "close_price",
+                "换手率": "turnover_rate",
+                "成交额": "amount",
+                "总市值": "market_cap",
+                "流通市值": "circulation_market_cap",
+                "所属概念": "concepts_str",
+            }
+            logger.debug("   使用AKShare列名映射处理跌停数据")
 
         for _, row in df.iterrows():
             try:
+                # 获取股票名称，检查是否为ST股票
+                stock_name = None
+                if "name" in df.columns:  # Tushare
+                    stock_name = str(row["name"])
+                elif "名称" in df.columns:  # AKShare
+                    stock_name = str(row["名称"])
+
+                # 排除ST股票（包括ST、*ST、S*ST等）
+                if stock_name and ("ST" in stock_name.upper()):
+                    logger.debug(f"   跳过ST股票: {stock_name}")
+                    continue
+
                 record = {
                     "trade_date": trade_date,
                     "limit_type": "limit_down",
                 }
 
-                for ak_col, db_col in column_mapping.items():
-                    if ak_col in df.columns:
-                        value = row[ak_col]
+                for source_col, db_col in column_mapping.items():
+                    if source_col in df.columns:
+                        value = row[source_col]
                         if pd.isna(value):
                             record[db_col] = None
-                        elif db_col in ["stock_code", "stock_name"]:
+                        elif db_col == "stock_code":
+                            # 处理股票代码
+                            if is_tushare:
+                                # Tushare: 去除交易所后缀
+                                code_str = str(value).split('.')[0]
+                                record[db_col] = code_str
+                            else:
+                                # AKShare: 直接使用
+                                record[db_col] = str(value)
+                        elif db_col == "lu_desc":
+                            # Tushare专有：跌停原因/概念板块描述
+                            record[db_col] = str(value) if value else None
+                        elif db_col in ["stock_name", "concepts_str"]:
                             record[db_col] = str(value)
                         else:
                             try:
@@ -322,16 +582,25 @@ class LimitStocksCollector:
                             except:
                                 record[db_col] = None
 
-                # 处理概念
-                if "所属概念" in df.columns:
-                    concepts_str = row["所属概念"]
-                    if pd.notna(concepts_str) and concepts_str:
-                        concepts = [c.strip() for c in str(concepts_str).replace("；", ",").split(",") if c.strip()]
-                        record["concepts"] = concepts[:5]
-                    else:
-                        record["concepts"] = []
-                else:
-                    record["concepts"] = []
+                # 处理概念字段（Tushare的lu_desc或AKShare的所属概念）
+                concepts = []
+                if is_tushare and "lu_desc" in record and record["lu_desc"]:
+                    # Tushare: 解析 lu_desc 字段
+                    lu_desc = record["lu_desc"]
+                    concepts = [c.strip() for c in lu_desc.split('+') if c.strip()]
+                    logger.debug(f"   Tushare解析跌停概念: {concepts}")
+                elif "concepts_str" in record and record["concepts_str"]:
+                    # AKShare: 解析"所属概念"字段
+                    concepts_str = record["concepts_str"]
+                    concepts = [c.strip() for c in str(concepts_str).replace("；", ",").split(",") if c.strip()]
+                    logger.debug(f"   AKShare解析跌停概念: {concepts}")
+
+                # 保存概念数组（最多5个）
+                record["concepts"] = concepts[:5]
+
+                # 清理中间字段
+                record.pop("lu_desc", None)
+                record.pop("concepts_str", None)
 
                 if "stock_code" in record and "stock_name" in record:
                     records.append(record)
