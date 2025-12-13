@@ -168,7 +168,7 @@ const getKlineOption = (klineData: any[], showLegend: boolean = true) => {
         smooth: true,
         lineStyle: { width: 1.5, color: '#000000' },  // 黑色
         symbol: 'none',
-        connectNulls: false
+        connectNulls: true  // 连接null值处的断点
       },
       {
         name: 'MA10',
@@ -177,7 +177,7 @@ const getKlineOption = (klineData: any[], showLegend: boolean = true) => {
         smooth: true,
         lineStyle: { width: 1.5, color: '#eab308' },  // 黄色
         symbol: 'none',
-        connectNulls: false
+        connectNulls: true  // 连接null值处的断点
       },
       {
         name: 'MA20',
@@ -186,7 +186,7 @@ const getKlineOption = (klineData: any[], showLegend: boolean = true) => {
         smooth: true,
         lineStyle: { width: 1.5, color: '#ec4899' },  // 粉色
         symbol: 'none',
-        connectNulls: false
+        connectNulls: true  // 连接null值处的断点
       }
     ]
   };
@@ -224,6 +224,7 @@ export default function MarketAnalysisPage() {
 
   const szIndexData = szResponse?.data;
   const szKlineData = szIndexData?.data || [];
+  const szTrendAnalysis = szIndexData?.trend_analysis;
 
   const cybIndexData = cybResponse?.data;
   const cybKlineData = cybIndexData?.data || [];
@@ -236,14 +237,17 @@ export default function MarketAnalysisPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">大盘分析</h1>
         <p className="text-sm text-gray-500">
-          数据更新时间: {new Date().toLocaleString('zh-CN')}
+          数据日期: {shKlineData.length > 0 ? shKlineData[shKlineData.length - 1]?.trade_date : '加载中...'}
         </p>
       </div>
 
-      {/* 走势判断卡片 */}
-      {shTrendAnalysis && (
+      {/* 上证指数走势判断卡片 */}
+      {shTrendAnalysis && shTrendAnalysis.trend && (
         <Card>
           <CardContent className="pt-6">
+            <div className="mb-3">
+              <h2 className="text-xl font-bold text-blue-600">上证指数</h2>
+            </div>
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold mb-2">
@@ -269,30 +273,99 @@ export default function MarketAnalysisPage() {
             {/* 均线数据 */}
             <div className="grid grid-cols-3 gap-4 mt-4">
               <div className="text-center p-3 bg-gray-50 rounded">
-                <div className="text-sm text-gray-500">MA5</div>
-                <div className="text-lg font-semibold text-purple-500">
-                  {shTrendAnalysis.ma5 || 'N/A'}
-                </div>
-                <div className="text-xs text-gray-400">
-                  {shTrendAnalysis.ma5_position === 'above' ? '价格在上方' : '价格在下方'}
-                </div>
-              </div>
-              <div className="text-center p-3 bg-gray-50 rounded">
-                <div className="text-sm text-gray-500">MA10</div>
-                <div className="text-lg font-semibold text-orange-500">
-                  {shTrendAnalysis.ma10 || 'N/A'}
-                </div>
-                <div className="text-xs text-gray-400">
-                  {shTrendAnalysis.ma10_position === 'above' ? '价格在上方' : '价格在下方'}
+                <div className="text-sm text-gray-500 mb-2">MA5</div>
+                <div className={`text-4xl font-bold ${
+                  shTrendAnalysis.ma5_position === 'above' ? 'text-red-500' :
+                  shTrendAnalysis.ma5_position === 'below' ? 'text-green-500' : 'text-gray-500'
+                }`}>
+                  {shTrendAnalysis.ma5_position === 'above' ? '高' :
+                   shTrendAnalysis.ma5_position === 'below' ? '破' : '平'}
                 </div>
               </div>
               <div className="text-center p-3 bg-gray-50 rounded">
-                <div className="text-sm text-gray-500">MA20</div>
-                <div className="text-lg font-semibold text-blue-500">
-                  {shTrendAnalysis.ma20 || 'N/A'}
+                <div className="text-sm text-gray-500 mb-2">MA10</div>
+                <div className={`text-4xl font-bold ${
+                  shTrendAnalysis.ma10_position === 'above' ? 'text-red-500' :
+                  shTrendAnalysis.ma10_position === 'below' ? 'text-green-500' : 'text-gray-500'
+                }`}>
+                  {shTrendAnalysis.ma10_position === 'above' ? '高' :
+                   shTrendAnalysis.ma10_position === 'below' ? '破' : '平'}
                 </div>
-                <div className="text-xs text-gray-400">
-                  {shTrendAnalysis.ma20_position === 'above' ? '价格在上方' : '价格在下方'}
+              </div>
+              <div className="text-center p-3 bg-gray-50 rounded">
+                <div className="text-sm text-gray-500 mb-2">MA20</div>
+                <div className={`text-4xl font-bold ${
+                  shTrendAnalysis.ma20_position === 'above' ? 'text-red-500' :
+                  shTrendAnalysis.ma20_position === 'below' ? 'text-green-500' : 'text-gray-500'
+                }`}>
+                  {shTrendAnalysis.ma20_position === 'above' ? '高' :
+                   shTrendAnalysis.ma20_position === 'below' ? '破' : '平'}
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* 深证成指走势判断卡片 */}
+      {szTrendAnalysis && szTrendAnalysis.trend && (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="mb-3">
+              <h2 className="text-xl font-bold text-green-600">深证成指</h2>
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold mb-2">
+                  走势判断: <span className={`${
+                    szTrendAnalysis.trend === '上涨' ? 'text-red-500' :
+                    szTrendAnalysis.trend === '下跌' ? 'text-green-500' : 'text-blue-600'
+                  }`}>{szTrendAnalysis.trend}</span>
+                </h3>
+                <p className="text-sm text-gray-500">
+                  {szTrendAnalysis.description}
+                </p>
+              </div>
+              <div className="text-right">
+                <div className="text-3xl font-bold">
+                  {szTrendAnalysis.current_price}
+                </div>
+                <div className={`text-sm ${szTrendAnalysis.change_5d >= 0 ? 'text-red-500' : 'text-green-500'}`}>
+                  近5日: {szTrendAnalysis.change_5d >= 0 ? '+' : ''}{szTrendAnalysis.change_5d.toFixed(2)}%
+                </div>
+              </div>
+            </div>
+
+            {/* 均线数据 */}
+            <div className="grid grid-cols-3 gap-4 mt-4">
+              <div className="text-center p-3 bg-gray-50 rounded">
+                <div className="text-sm text-gray-500 mb-2">MA5</div>
+                <div className={`text-4xl font-bold ${
+                  szTrendAnalysis.ma5_position === 'above' ? 'text-red-500' :
+                  szTrendAnalysis.ma5_position === 'below' ? 'text-green-500' : 'text-gray-500'
+                }`}>
+                  {szTrendAnalysis.ma5_position === 'above' ? '高' :
+                   szTrendAnalysis.ma5_position === 'below' ? '破' : '平'}
+                </div>
+              </div>
+              <div className="text-center p-3 bg-gray-50 rounded">
+                <div className="text-sm text-gray-500 mb-2">MA10</div>
+                <div className={`text-4xl font-bold ${
+                  szTrendAnalysis.ma10_position === 'above' ? 'text-red-500' :
+                  szTrendAnalysis.ma10_position === 'below' ? 'text-green-500' : 'text-gray-500'
+                }`}>
+                  {szTrendAnalysis.ma10_position === 'above' ? '高' :
+                   szTrendAnalysis.ma10_position === 'below' ? '破' : '平'}
+                </div>
+              </div>
+              <div className="text-center p-3 bg-gray-50 rounded">
+                <div className="text-sm text-gray-500 mb-2">MA20</div>
+                <div className={`text-4xl font-bold ${
+                  szTrendAnalysis.ma20_position === 'above' ? 'text-red-500' :
+                  szTrendAnalysis.ma20_position === 'below' ? 'text-green-500' : 'text-gray-500'
+                }`}>
+                  {szTrendAnalysis.ma20_position === 'above' ? '高' :
+                   szTrendAnalysis.ma20_position === 'below' ? '破' : '平'}
                 </div>
               </div>
             </div>
@@ -377,8 +450,25 @@ export default function MarketAnalysisPage() {
 
       {/* 大盘每日总成交额柱状图 */}
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle>两市每日总成交额（近60日）</CardTitle>
+          {sentimentHistoryData.length > 0 && (() => {
+            const latestData = sentimentHistoryData[sentimentHistoryData.length - 1];
+            const prevData = sentimentHistoryData.length > 1 ? sentimentHistoryData[sentimentHistoryData.length - 2] : null;
+            const todayAmount = Math.round(latestData.total_amount / 100000000);
+            const changePct = prevData
+              ? ((latestData.total_amount - prevData.total_amount) / prevData.total_amount * 100)
+              : 0;
+            const isUp = changePct >= 0;
+            return (
+              <div className="text-right">
+                <div className="text-2xl font-bold">{todayAmount.toLocaleString()}<span className="text-sm font-normal text-gray-500 ml-1">亿</span></div>
+                <div className={`text-xs ${isUp ? 'text-red-500' : 'text-green-500'}`}>
+                  较昨日: {isUp ? '+' : ''}{changePct.toFixed(2)}%
+                </div>
+              </div>
+            );
+          })()}
         </CardHeader>
         <CardContent>
           {sentimentHistoryLoading ? (
@@ -402,10 +492,11 @@ export default function MarketAnalysisPage() {
                   }
                 },
                 grid: {
-                  left: '10%',
-                  right: '10%',
+                  left: '3%',
+                  right: '3%',
                   top: 40,
-                  bottom: 60
+                  bottom: 60,
+                  containLabel: true
                 },
                 xAxis: {
                   type: 'category',

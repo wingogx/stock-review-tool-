@@ -1,276 +1,179 @@
 """
 市场情绪数据采集服务
-使用 AKShare 采集市场情绪相关数据：涨跌比、涨停数、连板分布、炸板率等
+使用 Tushare Pro 采集市场情绪相关数据：涨跌比、涨停数、连板分布、炸板率等
 
 数据来源:
-- stock_market_activity_legu: 乐咕乐股-市场异动（用于统计涨跌家数）✅ 稳定
-- stock_sse_deal_daily: 上交所-每日概览（用于统计上交所成交额）✅ 稳定
-- stock_szse_summary: 深交所-市场总貌（用于统计深交所成交额）✅ 稳定
-- stock_zt_pool_em: 涨停股池数据（真实涨停数据）
-- stock_zt_pool_dtgc_em: 跌停股池数据
+- daily: 每日行情（统计涨跌家数、总成交额）✅ Tushare
+- limit_list_d: 涨跌停列表（涨停、跌停、炸板、连板统计）✅ Tushare
 """
 
-import akshare as ak
+import tushare as ts
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from loguru import logger
 import json
+import os
 
 from app.utils.supabase_client import get_supabase
 from app.utils.trading_date import get_latest_trading_date
 
 
 class MarketSentimentCollector:
-    """市场情绪数据采集器"""
+    """市场情绪数据采集器（基于Tushare）"""
 
     def __init__(self):
         self.supabase = get_supabase()
+        self._tushare_pro = None
 
-    def collect_market_activity_data(self) -> Dict:
+    @property
+    def tushare_pro(self):
+        """延迟初始化 Tushare Pro API"""
+        if self._tushare_pro is None:
+            token = os.getenv("TUSHARE_TOKEN")
+            if not token:
+                raise ValueError("TUSHARE_TOKEN 未配置")
+
+            try:
+                http_url = os.getenv("TUSHARE_HTTP_URL")
+                if http_url:
+                    self._tushare_pro = ts.pro_api()
+                    self._tushare_pro._DataApi__token = token
+                    self._tushare_pro._DataApi__http_url = http_url
+                    logger.debug(f"✅ Tushare Pro API 初始化成功（高级账号）")
+                else:
+                    self._tushare_pro = ts.pro_api(token)
+                    logger.debug("✅ Tushare Pro API 初始化成功（标准账号）")
+            except Exception as e:
+                logger.error(f"Tushare Pro 初始化失败: {e}")
+                raise
+        return self._tushare_pro
+
+    def collect_market_stats(self, trade_date: str) -> Dict:
         """
-        采集市场异动数据（用于统计涨跌家数）
-        使用乐咕乐股-市场异动接口（稳定可靠）
+        采集市场统计数据（涨跌家数、总成交额）
+        使用 Tushare daily 接口
+
+        Args:
+            trade_date: 交易日期 YYYYMMDD
 
         Returns:
-            市场异动数据字典
+            市场统计数据字典 {up_count, down_count, flat_count, total_amount}
         """
         try:
-            logger.info("采集市场异动数据...")
-            df = ak.stock_market_activity_legu()
+            logger.info(f"采集市场统计数据 {trade_date}...")
+
+            df = self.tushare_pro.daily(trade_date=trade_date)
 
             if df is None or df.empty:
-                logger.warning("市场异动数据为空")
+                logger.warning(f"市场统计数据为空: {trade_date}")
                 return {}
 
-            # 将数据转换为字典
-            data_dict = dict(zip(df['item'], df['value']))
+            # 统计涨跌家数
+            up_count = len(df[df['pct_chg'] > 0])
+            down_count = len(df[df['pct_chg'] < 0])
+            flat_count = len(df[df['pct_chg'] == 0])
 
-            logger.info(f"成功采集市场异动数据: 上涨{data_dict.get('上涨', 0)}, 下跌{data_dict.get('下跌', 0)}")
-            return data_dict
+            # 计算总成交额（Tushare的amount单位是千元）
+            total_amount = float(df['amount'].sum()) * 1000  # 千元 -> 元
+
+            logger.info(f"✅ 市场统计: 上涨{up_count}, 下跌{down_count}, 平盘{flat_count}, 成交额{total_amount/1e8:.2f}亿")
+
+            return {
+                'up_count': up_count,
+                'down_count': down_count,
+                'flat_count': flat_count,
+                'total_amount': total_amount,
+            }
 
         except Exception as e:
-            logger.error(f"采集市场异动数据失败: {str(e)}")
+            logger.error(f"采集市场统计数据失败: {str(e)}")
             return {}
 
-    def collect_total_amount(self, date: str) -> float:
+    def collect_limit_data(self, trade_date: str) -> Dict:
         """
-        采集两市总成交额（上交所 + 深交所）
+        采集涨跌停数据（涨停、跌停、炸板、连板分布）
+        使用 Tushare limit_list_d 接口
 
         Args:
-            date: 日期 YYYYMMDD
+            trade_date: 交易日期 YYYYMMDD
 
         Returns:
-            总成交额（元）
+            涨跌停数据字典
         """
         try:
-            total_amount = 0.0
+            logger.info(f"采集涨跌停数据 {trade_date}...")
 
-            # 1. 获取上交所成交额
-            try:
-                sse_df = ak.stock_sse_deal_daily(date=date)
-                if not sse_df.empty:
-                    amount_row = sse_df[sse_df['单日情况'] == '成交金额']
-                    if not amount_row.empty:
-                        sse_amount_yi = float(amount_row['股票'].iloc[0])
-                        sse_amount = sse_amount_yi * 1e8  # 转换为元
-                        total_amount += sse_amount
-                        logger.debug(f"上交所成交额: {sse_amount_yi:.2f} 亿元")
-            except Exception as e:
-                logger.warning(f"获取上交所成交额失败: {e}")
-
-            # 2. 获取深交所成交额
-            try:
-                szse_df = ak.stock_szse_summary(date=date)
-                if not szse_df.empty:
-                    stock_row = szse_df[szse_df['证券类别'] == '股票']
-                    if not stock_row.empty:
-                        szse_amount = float(stock_row['成交金额'].iloc[0])  # 单位：元
-                        total_amount += szse_amount
-                        logger.debug(f"深交所成交额: {szse_amount / 1e8:.2f} 亿元")
-            except Exception as e:
-                logger.warning(f"获取深交所成交额失败: {e}")
-
-            if total_amount > 0:
-                logger.info(f"两市总成交额: {total_amount / 1e8:.2f} 亿元")
-            else:
-                logger.warning("未能获取两市成交额数据")
-
-            return total_amount
-
-        except Exception as e:
-            logger.error(f"采集两市总成交额失败: {str(e)}")
-            return 0.0
-
-    def collect_limit_up_pool(self, date: Optional[str] = None) -> pd.DataFrame:
-        """
-        采集涨停股池数据（真实数据）
-
-        Args:
-            date: 日期 YYYYMMDD，默认为今天
-
-        Returns:
-            DataFrame with limit-up stocks
-        """
-        try:
-            logger.info("采集涨停股池数据...")
-
-            # 使用东方财富涨停股池接口（实时数据）
-            df = ak.stock_zt_pool_em(date=date or datetime.now().strftime("%Y%m%d"))
+            df = self.tushare_pro.limit_list_d(trade_date=trade_date)
 
             if df is None or df.empty:
-                logger.warning("涨停股池数据为空")
-                return pd.DataFrame()
+                logger.warning(f"涨跌停数据为空: {trade_date}")
+                return {
+                    'limit_up_count': 0,
+                    'limit_down_count': 0,
+                    'exploded_count': 0,
+                    'continuous_limit_distribution': {},
+                }
 
-            logger.info(f"成功采集涨停股池，共 {len(df)} 只涨停股")
-            return df
+            # 统计涨停、跌停、炸板
+            # limit字段: U=涨停, D=跌停, Z=炸板
+            limit_up_count = len(df[df['limit'] == 'U'])
+            limit_down_count = len(df[df['limit'] == 'D'])
+            exploded_count = len(df[df['limit'] == 'Z'])
+
+            # 计算连板分布（只统计涨停股票）
+            limit_up_df = df[df['limit'] == 'U']
+            continuous_distribution = self._calculate_continuous_distribution(limit_up_df)
+
+            logger.info(f"✅ 涨跌停统计: 涨停{limit_up_count}, 跌停{limit_down_count}, 炸板{exploded_count}")
+            logger.info(f"   连板分布: {continuous_distribution}")
+
+            return {
+                'limit_up_count': limit_up_count,
+                'limit_down_count': limit_down_count,
+                'exploded_count': exploded_count,
+                'continuous_limit_distribution': continuous_distribution,
+            }
 
         except Exception as e:
-            logger.error(f"采集涨停股池失败: {str(e)}")
-            return pd.DataFrame()
+            logger.error(f"采集涨跌停数据失败: {str(e)}")
+            return {
+                'limit_up_count': 0,
+                'limit_down_count': 0,
+                'exploded_count': 0,
+                'continuous_limit_distribution': {},
+            }
 
-    def collect_limit_down_pool(self, date: Optional[str] = None) -> pd.DataFrame:
+    def _calculate_continuous_distribution(self, limit_up_df: pd.DataFrame) -> Dict[str, int]:
         """
-        采集跌停股池数据（真实数据）
+        计算连板分布（基于Tushare的limit_times字段）
 
         Args:
-            date: 日期 YYYYMMDD，默认为今天
+            limit_up_df: 涨停股票数据
 
         Returns:
-            DataFrame with limit-down stocks
+            连板分布字典 {"1": count, "2": count, ...}
         """
-        try:
-            logger.info("采集跌停股池数据...")
-
-            # 使用东方财富跌停股池接口
-            df = ak.stock_zt_pool_dtgc_em(date=date or datetime.now().strftime("%Y%m%d"))
-
-            if df is None or df.empty:
-                logger.warning("跌停股池数据为空")
-                return pd.DataFrame()
-
-            logger.info(f"成功采集跌停股池，共 {len(df)} 只跌停股")
-            return df
-
-        except Exception as e:
-            logger.error(f"采集跌停股池失败: {str(e)}")
-            return pd.DataFrame()
-
-    def collect_exploded_pool(self, date: Optional[str] = None) -> pd.DataFrame:
-        """
-        采集炸板股池数据（触及涨停但未封住的股票）
-
-        Args:
-            date: 日期 YYYYMMDD，默认为今天
-
-        Returns:
-            DataFrame with exploded stocks
-        """
-        try:
-            logger.info("采集炸板股池数据...")
-
-            # 使用东方财富炸板股池接口
-            df = ak.stock_zt_pool_zbgc_em(date=date or datetime.now().strftime("%Y%m%d"))
-
-            if df is None or df.empty:
-                logger.warning("炸板股池数据为空")
-                return pd.DataFrame()
-
-            logger.info(f"成功采集炸板股池，共 {len(df)} 只炸板股")
-            return df
-
-        except Exception as e:
-            logger.error(f"采集炸板股池失败: {str(e)}")
-            return pd.DataFrame()
-
-
-    def calculate_continuous_distribution(self, limit_up_df: pd.DataFrame) -> Dict[str, int]:
-        """
-        计算连板分布（基于真实数据）
-
-        Args:
-            limit_up_df: 涨停股池数据（包含连板天数）
-
-        Returns:
-            连板分布字典 {"1": count, "2": count, "3": count, "4": count, "5": count, ...}
-        """
-        try:
-            if limit_up_df.empty:
-                return {"1": 0}
-
-            # 检查是否有连板天数字段
-            continuous_col = None
-            for col in ['连板数', '几板', '连板天数', '涨停统计']:
-                if col in limit_up_df.columns:
-                    continuous_col = col
-                    break
-
-            if not continuous_col:
-                # 如果没有连板字段，默认都是首板
-                return {"1": len(limit_up_df)}
-
-            # 统计连板分布（不聚合，保留具体板数）
-            distribution = {}
-
-            for value in limit_up_df[continuous_col]:
-                try:
-                    # 处理可能的字符串格式
-                    if isinstance(value, str):
-                        # 提取数字
-                        import re
-                        match = re.search(r'\d+', value)
-                        if match:
-                            days = int(match.group())
-                        else:
-                            days = 1
-                    else:
-                        days = int(value)
-
-                    # 直接使用板数作为键
-                    key = str(days)
-                    distribution[key] = distribution.get(key, 0) + 1
-
-                except:
-                    distribution["1"] = distribution.get("1", 0) + 1
-
-            logger.info(f"连板分布: {distribution}")
-            return distribution
-
-        except Exception as e:
-            logger.error(f"计算连板分布失败: {str(e)}")
+        if limit_up_df.empty:
             return {"1": 0}
 
-    def calculate_explosion_rate(self, limit_up_count: int, exploded_df: pd.DataFrame) -> tuple:
-        """
-        计算炸板率（通用口径：炸板股数 / 触及涨停总数）
+        distribution = {}
 
-        Args:
-            limit_up_count: 涨停股数量（收盘封住的）
-            exploded_df: 炸板股池数据（触及涨停但未封住的）
+        # 使用limit_times字段（连板天数）
+        if 'limit_times' in limit_up_df.columns:
+            for times in limit_up_df['limit_times']:
+                if pd.notna(times):
+                    days = int(times)
+                    key = str(days)
+                    distribution[key] = distribution.get(key, 0) + 1
+                else:
+                    # 如果没有连板天数，默认为首板
+                    distribution["1"] = distribution.get("1", 0) + 1
+        else:
+            # 如果没有limit_times字段，全部算作首板
+            distribution["1"] = len(limit_up_df)
 
-        Returns:
-            (炸板数, 炸板率)
-        """
-        try:
-            # 炸板股数量
-            exploded_count = len(exploded_df) if not exploded_df.empty else 0
-
-            # 总触及涨停数 = 涨停股数 + 炸板股数
-            total_touched = limit_up_count + exploded_count
-
-            if total_touched == 0:
-                logger.warning("没有股票触及涨停板")
-                return 0, 0.0
-
-            # 炸板率 = 炸板股数 / 总触及涨停数 × 100%
-            explosion_rate = (exploded_count / total_touched * 100) if total_touched > 0 else 0.0
-
-            logger.info(f"炸板统计（通用口径）: 炸板{exploded_count}只 / 触及涨停{total_touched}只 = {explosion_rate:.2f}%")
-            return exploded_count, explosion_rate
-
-        except Exception as e:
-            logger.error(f"计算炸板率失败: {str(e)}")
-            return 0, 0.0
+        return distribution
 
     def collect_market_sentiment(self, trade_date: Optional[str] = None) -> Dict:
         """
@@ -283,46 +186,30 @@ class MarketSentimentCollector:
             市场情绪数据字典
         """
         if not trade_date:
-            trade_date = get_latest_trading_date()  # 使用最近交易日而不是系统当前日期
+            trade_date = get_latest_trading_date()
 
-        date_akshare = trade_date.replace("-", "")
+        date_ts = trade_date.replace("-", "")
 
-        logger.info(f"开始采集 {trade_date} 市场情绪数据...")
+        logger.info(f"开始采集 {trade_date} 市场情绪数据（Tushare）...")
 
-        # 1. 采集市场异动数据（涨跌家数）
-        market_activity = self.collect_market_activity_data()
+        # 1. 采集市场统计数据（涨跌家数、总成交额）
+        market_stats = self.collect_market_stats(date_ts)
 
-        # 2. 采集两市总成交额
-        total_amount = self.collect_total_amount(date_akshare)
+        # 2. 采集涨跌停数据（涨停、跌停、炸板、连板分布）
+        limit_data = self.collect_limit_data(date_ts)
 
-        # 3. 采集涨停股池
-        limit_up_df = self.collect_limit_up_pool(date_akshare)
-
-        # 4. 采集跌停股池
-        limit_down_df = self.collect_limit_down_pool(date_akshare)
-
-        # 5. 采集炸板股池（触及涨停但未封住的）
-        exploded_df = self.collect_exploded_pool(date_akshare)
-
-        # 6. 从市场异动数据中提取涨跌家数
-        up_count = int(market_activity.get('上涨', 0))
-        down_count = int(market_activity.get('下跌', 0))
-        flat_count = int(market_activity.get('平盘', 0))
-
-        # 计算涨跌比
+        # 3. 计算涨跌比
+        up_count = market_stats.get('up_count', 0)
+        down_count = market_stats.get('down_count', 0)
         up_down_ratio = (up_count / down_count) if down_count > 0 else 0.0
 
-        # 7. 统计涨跌停数量
-        limit_up_count = len(limit_up_df)
-        limit_down_count = len(limit_down_df)
+        # 4. 计算炸板率（通用口径：炸板数 / 触及涨停总数）
+        limit_up_count = limit_data.get('limit_up_count', 0)
+        exploded_count = limit_data.get('exploded_count', 0)
+        total_touched = limit_up_count + exploded_count
+        explosion_rate = (exploded_count / total_touched * 100) if total_touched > 0 else 0.0
 
-        # 8. 计算连板分布
-        continuous_distribution = self.calculate_continuous_distribution(limit_up_df)
-
-        # 9. 计算炸板率（通用口径）
-        exploded_count, explosion_rate = self.calculate_explosion_rate(limit_up_count, exploded_df)
-
-        # 10. 计算市场状态（基于上涨股票占比）
+        # 5. 计算市场状态（基于上涨股票占比）
         total_stocks = up_count + down_count
         up_pct = (up_count / total_stocks * 100) if total_stocks > 0 else 0
 
@@ -335,20 +222,25 @@ class MarketSentimentCollector:
 
         sentiment_data = {
             "trade_date": trade_date,
-            "total_amount": total_amount,
+            "total_amount": market_stats.get('total_amount', 0),
             "up_count": up_count,
             "down_count": down_count,
-            "flat_count": flat_count,
+            "flat_count": market_stats.get('flat_count', 0),
             "up_down_ratio": round(up_down_ratio, 4),
             "limit_up_count": limit_up_count,
-            "limit_down_count": limit_down_count,
-            "continuous_limit_distribution": continuous_distribution,
+            "limit_down_count": limit_data.get('limit_down_count', 0),
+            "continuous_limit_distribution": limit_data.get('continuous_limit_distribution', {}),
             "exploded_count": exploded_count,
             "explosion_rate": round(explosion_rate, 4),
             "market_status": market_status,
         }
 
-        logger.info(f"市场情绪数据采集完成: 涨{up_count}/跌{down_count}, 涨停{limit_up_count}/跌停{limit_down_count}, 总成交额{total_amount/1e8:.2f}亿, 炸板率{explosion_rate:.2f}%")
+        logger.info(
+            f"市场情绪数据采集完成: 涨{up_count}/跌{down_count}, "
+            f"涨停{limit_up_count}/跌停{limit_data.get('limit_down_count', 0)}, "
+            f"总成交额{market_stats.get('total_amount', 0)/1e8:.2f}亿, "
+            f"炸板率{explosion_rate:.2f}%"
+        )
 
         return sentiment_data
 
@@ -386,7 +278,7 @@ class MarketSentimentCollector:
                 record, on_conflict="trade_date"
             ).execute()
 
-            logger.info(f"成功保存市场情绪数据")
+            logger.info(f"✅ 成功保存市场情绪数据")
             return True
 
         except Exception as e:

@@ -24,7 +24,7 @@ class MarketIndexItem(BaseModel):
     volume: Optional[float] = Field(None, description="成交量")
     amount: Optional[float] = Field(None, description="成交额")
     amplitude: Optional[float] = Field(None, description="振幅(%)")
-    volume_change_pct: Optional[float] = Field(None, description="成交量环比变化率(%)")
+    amount_change_pct: Optional[float] = Field(None, description="成交额环比变化率(%)")
 
     class Config:
         from_attributes = True
@@ -46,8 +46,8 @@ class SentimentScoreDetail(BaseModel):
     """情绪评分明细"""
     up_ratio_score: int = Field(..., description="上涨占比得分(-1/0/+1)")
     amount_change_score: int = Field(..., description="成交额变化得分(-1/0/+1)")
-    limit_up_change_score: int = Field(..., description="涨停数变化得分(-1/0/+1)")
-    limit_down_change_score: int = Field(..., description="跌停数变化得分(-1/0/+1)")
+    limit_up_score: int = Field(..., description="涨停数得分(-1/0/+1): >=100→+1, 50-99→0, <50→-1")
+    limit_down_score: int = Field(..., description="跌停数得分(-1/0/+1): <=5→+1, 6-15→0, >15→-1")
     explosion_rate_score: int = Field(..., description="炸板率得分(-1/0/+1)")
     total_score: int = Field(..., description="总得分(-5~+5)")
     sentiment_level: str = Field(..., description="情绪等级")
@@ -64,6 +64,8 @@ class MarketSentimentItem(BaseModel):
     down_count: int = Field(..., description="下跌家数")
     flat_count: int = Field(0, description="平盘家数")
     up_down_ratio: float = Field(..., description="涨跌比")
+    prev_up_count: Optional[int] = Field(None, description="昨日上涨家数")
+    prev_down_count: Optional[int] = Field(None, description="昨日下跌家数")
     limit_up_count: int = Field(..., description="涨停数量")
     limit_down_count: int = Field(..., description="跌停数量")
     prev_limit_up_count: Optional[int] = Field(None, description="昨日涨停数量")

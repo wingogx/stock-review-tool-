@@ -6,10 +6,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# 加载环境变量
-load_dotenv()
+# 加载环境变量（从项目根目录）
+env_path = Path(__file__).parent.parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 # 应用元数据
 APP_TITLE = "股票短线复盘 API"
@@ -124,7 +126,7 @@ async def get_config():
 # 路由注册
 # ============================================
 
-from app.routers import market_router, limit_stocks_router, concepts_router
+from app.routers import market_router, limit_stocks_router, concepts_router, sector_router, sentiment_router, stock_router, backtest_router
 
 # 市场数据路由
 app.include_router(
@@ -145,6 +147,32 @@ app.include_router(
     concepts_router,
     prefix="/api/concepts",
     tags=["概念板块"]
+)
+
+# 板块分析路由
+app.include_router(
+    sector_router,
+    tags=["板块分析"]
+)
+
+# 情绪分析路由
+app.include_router(
+    sentiment_router,
+    tags=["情绪分析"]
+)
+
+# 个股分析路由
+app.include_router(
+    stock_router,
+    prefix="/api/stock",
+    tags=["个股分析"]
+)
+
+# 回测分析路由
+app.include_router(
+    backtest_router,
+    prefix="/api/backtest",
+    tags=["回测分析"]
 )
 
 # TODO: 龙虎榜路由（需要先实现数据采集）

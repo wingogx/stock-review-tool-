@@ -24,12 +24,21 @@ def calculate_sentiment_score(data: dict) -> SentimentScoreDetail:
     """
     计算市场情绪评分
 
-    评分维度：
+    评分维度（5项，每项 -1/0/+1，总分范围 -5 ~ +5）：
     1. 上涨占比: >50% +1, 30%-50% 0, <30% -1
     2. 成交额变化: >+10% +1, ±10% 0, <-10% -1
-    3. 涨停数变化: 增加 +1, 小幅减少 0, 大幅减少(>30%) -1
-    4. 跌停数变化: 减少 +1, 小幅增加 0, 大幅增加(>50%) -1
+    3. 涨停数（绝对数量）: >=100只 +1, 50-99只 0, <50只 -1
+    4. 跌停数（绝对数量）: <=5只 +1, 6-15只 0, >15只 -1
     5. 炸板率: <20% +1, 20%-30% 0, >30% -1
+
+    情绪等级映射：
+    +4~+5: 极度亢奋 (深红)
+    +2~+3: 情绪偏热 (橙色)
+    +1: 情绪偏暖 (黄色)
+    0: 情绪中性 (灰色)
+    -1: 情绪偏冷 (黄色)
+    -2~-3: 情绪偏弱 (蓝色)
+    -4~-5: 极度冰点 (绿色)
     """
     scores = {}
 
@@ -58,38 +67,25 @@ def calculate_sentiment_score(data: dict) -> SentimentScoreDetail:
     else:
         scores['amount_change_score'] = 0
 
-    # 3. 涨停数变化得分
+    # 3. 涨停数得分（基于绝对数量，参考市场通用标准）
+    # 标准来源：主板涨停<50只为弱势，>100只为强势
     limit_up = data.get('limit_up_count', 0)
-    prev_limit_up = data.get('prev_limit_up_count')
-    if prev_limit_up is not None and prev_limit_up > 0:
-        if limit_up > prev_limit_up:
-            scores['limit_up_change_score'] = 1
-        elif limit_up < prev_limit_up * 0.7:  # 降幅超过30%
-            scores['limit_up_change_score'] = -1
-        else:
-            scores['limit_up_change_score'] = 0
+    if limit_up >= 100:
+        scores['limit_up_score'] = 1      # 强势：做多热情高涨
+    elif limit_up >= 50:
+        scores['limit_up_score'] = 0      # 中性：正常水平
     else:
-        scores['limit_up_change_score'] = 0
+        scores['limit_up_score'] = -1     # 弱势：市场情绪不佳
 
-    # 4. 跌停数变化得分
+    # 4. 跌停数得分（基于绝对数量，参考市场通用标准）
+    # 标准来源：跌停<=5只为情绪高涨，>15只为恐慌
     limit_down = data.get('limit_down_count', 0)
-    prev_limit_down = data.get('prev_limit_down_count')
-    if prev_limit_down is not None:
-        if prev_limit_down == 0:
-            # 昨日跌停为0的特殊处理
-            if limit_down <= 3:
-                scores['limit_down_change_score'] = 0
-            else:
-                scores['limit_down_change_score'] = -1
-        else:
-            if limit_down < prev_limit_down:
-                scores['limit_down_change_score'] = 1
-            elif limit_down > prev_limit_down * 1.5:  # 增幅超过50%
-                scores['limit_down_change_score'] = -1
-            else:
-                scores['limit_down_change_score'] = 0
+    if limit_down <= 5:
+        scores['limit_down_score'] = 1    # 情绪好：恐慌低
+    elif limit_down <= 15:
+        scores['limit_down_score'] = 0    # 中性：正常水平
     else:
-        scores['limit_down_change_score'] = 0
+        scores['limit_down_score'] = -1   # 情绪差：恐慌蔓延
 
     # 5. 炸板率得分
     explosion_rate = data.get('explosion_rate', 0)
@@ -159,31 +155,31 @@ async def get_market_index(
                 detail=f"未找到 {trade_date} 的大盘指数数据"
             )
 
-        # 查询前一交易日数据用于计算成交量环比
-        prev_response = supabase.table("market_index").select("index_code,volume").lt(
+        # 查询前一交易日数据用于计算成交额环比
+        prev_response = supabase.table("market_index").select("index_code,amount").lt(
             "trade_date", trade_date
         ).order("trade_date", desc=True).limit(3).execute()
 
-        # 构建前一日成交量映射
-        prev_volume_map = {}
+        # 构建前一日成交额映射
+        prev_amount_map = {}
         if prev_response.data:
             for item in prev_response.data:
-                if item['index_code'] not in prev_volume_map:
-                    prev_volume_map[item['index_code']] = item['volume']
+                if item['index_code'] not in prev_amount_map:
+                    prev_amount_map[item['index_code']] = item['amount']
 
-        # 转换数据并计算成交量环比
+        # 转换数据并计算成交额环比
         indexes = []
         for item in response.data:
-            # 计算成交量环比变化率
+            # 计算成交额环比变化率
             index_code = item['index_code']
-            current_volume = item.get('volume')
-            prev_volume = prev_volume_map.get(index_code)
+            current_amount = item.get('amount')
+            prev_amount = prev_amount_map.get(index_code)
 
-            if current_volume and prev_volume and prev_volume > 0:
-                volume_change_pct = round((current_volume - prev_volume) / prev_volume * 100, 2)
-                item['volume_change_pct'] = volume_change_pct
+            if current_amount and prev_amount and prev_amount > 0:
+                amount_change_pct = round((current_amount - prev_amount) / prev_amount * 100, 2)
+                item['amount_change_pct'] = amount_change_pct
             else:
-                item['volume_change_pct'] = None
+                item['amount_change_pct'] = None
 
             indexes.append(MarketIndexItem.model_validate(item))
 
@@ -238,7 +234,7 @@ async def get_market_sentiment(
 
         # 查询前两个交易日的数据以计算环比和对比
         try:
-            prev_response = supabase.table("market_sentiment").select("total_amount,limit_up_count,limit_down_count,explosion_rate,continuous_limit_distribution").lt(
+            prev_response = supabase.table("market_sentiment").select("total_amount,up_count,down_count,limit_up_count,limit_down_count,explosion_rate,continuous_limit_distribution").lt(
                 "trade_date", trade_date
             ).order("trade_date", desc=True).limit(2).execute()
 
@@ -254,6 +250,10 @@ async def get_market_sentiment(
 
                 data['total_amount_change'] = round(total_amount_change, 2)
                 data['total_amount_change_pct'] = round(total_amount_change_pct, 2)
+
+                # 添加前1日涨跌家数
+                data['prev_up_count'] = prev_data.get('up_count')
+                data['prev_down_count'] = prev_data.get('down_count')
 
                 # 添加前1日涨停跌停数据
                 data['prev_limit_up_count'] = prev_data.get('limit_up_count')
@@ -281,6 +281,8 @@ async def get_market_sentiment(
                 # 如果无法获取前一日数据，设置为None
                 data['total_amount_change'] = None
                 data['total_amount_change_pct'] = None
+                data['prev_up_count'] = None
+                data['prev_down_count'] = None
                 data['prev_limit_up_count'] = None
                 data['prev_limit_down_count'] = None
                 data['prev_explosion_rate'] = None
@@ -290,6 +292,8 @@ async def get_market_sentiment(
             # 如果无法获取前一日数据，设置为None
             data['total_amount_change'] = None
             data['total_amount_change_pct'] = None
+            data['prev_up_count'] = None
+            data['prev_down_count'] = None
             data['prev_limit_up_count'] = None
             data['prev_limit_down_count'] = None
             data['prev_explosion_rate'] = None
@@ -384,25 +388,25 @@ async def get_index_history(
     days: int = Query(20, ge=5, le=60, description="查询天数")
 ):
     """
-    获取指数历史K线数据（支持走势识别）
+    获取指数历史K线数据（含走势分析）
 
     参数:
     - index_code: 指数代码 (SH000001=上证, SZ399001=深证, SZ399006=创业板)
     - days: 查询天数 (5-60天)
 
     返回:
-    - data: K线数据数组（按日期升序）
-    - trend_analysis: 走势分析
+    - data: K线数据数组（按日期升序，含走势分析字段）
+    - trend_analysis: 最新一日的走势分析
       - trend: 震荡/上涨/下跌
       - ma5_position: 当前价格与MA5关系
       - ma10_position: 当前价格与MA10关系
       - ma20_position: 当前价格与MA20关系
-      - description: 走势描述
+      - change_5d: 5日涨跌幅
     """
     try:
         supabase = get_supabase()
 
-        # 查询最近N天数据
+        # 查询最近N天数据（已包含走势分析字段）
         response = supabase.table("market_index")\
             .select("*")\
             .eq("index_code", index_code)\
@@ -419,8 +423,37 @@ async def get_index_history(
         # 按日期升序排列（K线图需要从旧到新）
         data = sorted(response.data, key=lambda x: x['trade_date'])
 
-        # 走势识别算法
-        trend_analysis = analyze_trend(data)
+        # 从最新一条记录获取走势分析（已在采集时计算好）
+        latest = data[-1]
+
+        # 生成走势描述
+        trend = latest.get("trend")
+        change_5d = latest.get("change_5d") or 0
+        ma5_pos = latest.get("ma5_position")
+
+        if trend == "上涨":
+            description = f"多头排列，价格站上均线，近5日涨{change_5d:.2f}%"
+        elif trend == "下跌":
+            description = f"空头排列，价格跌破均线，近5日跌{abs(change_5d):.2f}%"
+        else:
+            if abs(change_5d) < 2:
+                description = f"横盘整理，近5日涨跌幅{change_5d:.2f}%，波动较小"
+            elif ma5_pos == "above":
+                description = f"短期偏强，价格站上MA5，区间震荡"
+            elif ma5_pos == "below":
+                description = f"短期偏弱，价格跌破MA5，区间震荡"
+            else:
+                description = f"区间震荡，等待方向选择"
+
+        trend_analysis = {
+            "trend": trend,
+            "ma5_position": ma5_pos,
+            "ma10_position": latest.get("ma10_position"),
+            "ma20_position": latest.get("ma20_position"),
+            "change_5d": change_5d,
+            "current_price": latest.get("close_price"),
+            "description": description,
+        }
 
         return {
             "success": True,
@@ -460,12 +493,10 @@ def analyze_trend(kline_data: list) -> dict:
     latest = kline_data[-1]
     close_price = latest['close_price']
 
-    # 计算MA5, MA10, MA20（使用最近的数据）
-    closes = [item['close_price'] for item in kline_data]
-
-    ma5 = sum(closes[-5:]) / 5 if len(closes) >= 5 else None
-    ma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else None
-    ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else None
+    # 从数据库获取MA5, MA10, MA20（使用Tushare提供的均线数据）
+    ma5 = latest.get('ma5')
+    ma10 = latest.get('ma10')
+    ma20 = latest.get('ma20')
 
     # 计算近5日涨跌幅
     if len(kline_data) >= 6:
@@ -474,10 +505,21 @@ def analyze_trend(kline_data: list) -> dict:
     else:
         change_5d = 0
 
-    # 判断价格与均线位置
-    ma5_position = "above" if (ma5 and close_price > ma5) else "below"
-    ma10_position = "above" if (ma10 and close_price > ma10) else "below"
-    ma20_position = "above" if (ma20 and close_price > ma20) else "below"
+    # 判断价格与均线位置关系（支持above/below/equal三种状态）
+    def compare_price_ma(price, ma_value):
+        """比较价格与均线,返回 above/below/equal"""
+        if ma_value is None:
+            return "unknown"
+        if price > ma_value:
+            return "above"
+        elif price < ma_value:
+            return "below"
+        else:
+            return "equal"
+
+    ma5_position = compare_price_ma(close_price, ma5)
+    ma10_position = compare_price_ma(close_price, ma10)
+    ma20_position = compare_price_ma(close_price, ma20)
 
     # 判断均线排列（需要所有均线都存在）
     ma_aligned_up = (ma5 and ma10 and ma20 and ma5 > ma10 > ma20)  # 多头排列

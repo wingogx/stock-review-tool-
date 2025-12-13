@@ -9,10 +9,46 @@ import { useQuery } from '@tanstack/react-query';
 import { Card } from '@/components/ui/card';
 import { getMarketIndex, getMarketSentiment, getHotConcepts, getLimitStocks } from '@/lib/api';
 import { format } from 'date-fns';
+import { addToWatchlist, isInWatchlist } from '@/lib/watchlist';
 
 export default function Dashboard() {
   // 当前选中的连板数（默认显示2板）
   const [selectedContinuousDays, setSelectedContinuousDays] = useState<number | null>(2);
+
+  // Toast消息状态
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // 显示Toast消息
+  const showToast = (message: string) => {
+    setToastMessage(message);
+    setTimeout(() => setToastMessage(null), 2000);
+  };
+
+  // 添加股票到自选池
+  const handleAddToWatchlist = (stock: any, tradeDate: string) => {
+    const success = addToWatchlist({
+      stock_code: stock.stock_code,
+      stock_name: stock.stock_name,
+      continuous_days: stock.continuous_days,
+      change_pct: stock.change_pct,
+      close_price: stock.close_price,
+      circulation_market_cap: stock.circulation_market_cap,
+      turnover_rate: stock.turnover_rate,
+      sealed_amount: stock.sealed_amount,
+      main_net_inflow: stock.main_net_inflow,
+      first_limit_time: stock.first_limit_time,
+      opening_times: stock.opening_times,
+      limit_stats: stock.limit_stats,
+      is_strong_limit: stock.is_strong_limit,
+      trade_date: tradeDate,
+    });
+
+    if (success) {
+      showToast(`${stock.stock_name} 已添加到自选池`);
+    } else {
+      showToast(`${stock.stock_name} 已在自选池中`);
+    }
+  };
 
   // 获取大盘指数
   const { data: marketIndex, isLoading: indexLoading } = useQuery({
@@ -78,20 +114,20 @@ export default function Dashboard() {
                     </div>
                     <div className="text-sm text-gray-500 grid grid-cols-2 gap-2 mt-4">
                       <div>
-                        成交量:{' '}
+                        成交额:{' '}
                         <span className="font-medium">
-                          {index.volume ? `${(index.volume / 100000000).toFixed(0)}亿` : '-'}
+                          {index.amount ? `${(index.amount / 100000000).toFixed(0)}亿` : '-'}
                         </span>
                       </div>
                       <div>
                         较昨日:{' '}
                         <span className={`font-medium ${
-                          index.volume_change_pct !== undefined && index.volume_change_pct !== null
-                            ? index.volume_change_pct >= 0 ? 'text-red-600' : 'text-green-600'
+                          index.amount_change_pct !== undefined && index.amount_change_pct !== null
+                            ? index.amount_change_pct >= 0 ? 'text-red-600' : 'text-green-600'
                             : ''
                         }`}>
-                          {index.volume_change_pct !== undefined && index.volume_change_pct !== null
-                            ? `${index.volume_change_pct >= 0 ? '+' : ''}${index.volume_change_pct.toFixed(1)}%`
+                          {index.amount_change_pct !== undefined && index.amount_change_pct !== null
+                            ? `${index.amount_change_pct >= 0 ? '+' : ''}${index.amount_change_pct.toFixed(1)}%`
                             : '-'}
                         </span>
                       </div>
@@ -102,28 +138,55 @@ export default function Dashboard() {
             </div>
 
             {/* 市场情绪 */}
-            <Card title="市场情绪" subtitle="涨跌分布与市场状态">
+            <Card
+              title="市场情绪"
+              subtitle={`涨跌分布与市场状态 - ${marketSentiment?.data.market_status || '加载中...'}`}
+            >
               <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
                 {/* 第1列: 上涨占比 + 总成交额 */}
                 <div>
                   <div className="text-sm text-gray-500">上涨股票占比</div>
-                  <div
-                    className={`text-2xl font-bold mt-1 ${
-                      (() => {
+                  <div className="flex items-baseline gap-2 mt-1">
+                    <span
+                      className={`text-2xl font-bold ${
+                        (() => {
+                          const upCount = marketSentiment?.data.up_count ?? 0;
+                          const downCount = marketSentiment?.data.down_count ?? 0;
+                          const total = upCount + downCount;
+                          const upPct = total > 0 ? (upCount / total) * 100 : 0;
+                          return upPct > 50 ? 'text-red-600' : 'text-green-600';
+                        })()
+                      }`}
+                    >
+                      {(() => {
                         const upCount = marketSentiment?.data.up_count ?? 0;
                         const downCount = marketSentiment?.data.down_count ?? 0;
                         const total = upCount + downCount;
-                        const upPct = total > 0 ? (upCount / total) * 100 : 0;
-                        return upPct >= 60 ? 'text-red-600' : 'text-green-600';
-                      })()
-                    }`}
-                  >
+                        return total > 0 ? ((upCount / total) * 100).toFixed(2) : '0.00';
+                      })()}%
+                    </span>
                     {(() => {
                       const upCount = marketSentiment?.data.up_count ?? 0;
                       const downCount = marketSentiment?.data.down_count ?? 0;
-                      const total = upCount + downCount;
-                      return total > 0 ? ((upCount / total) * 100).toFixed(2) : '0.00';
-                    })()}%
+                      const prevUpCount = marketSentiment?.data.prev_up_count;
+                      const prevDownCount = marketSentiment?.data.prev_down_count;
+
+                      if (prevUpCount !== undefined && prevUpCount !== null &&
+                          prevDownCount !== undefined && prevDownCount !== null) {
+                        const total = upCount + downCount;
+                        const prevTotal = prevUpCount + prevDownCount;
+                        const currentPct = total > 0 ? (upCount / total) * 100 : 0;
+                        const prevPct = prevTotal > 0 ? (prevUpCount / prevTotal) * 100 : 0;
+                        const changePct = currentPct - prevPct;
+
+                        return (
+                          <span className={`text-xs ${changePct >= 0 ? 'text-red-500' : 'text-green-500'}`}>
+                            {changePct >= 0 ? '+' : ''}{changePct.toFixed(1)}%
+                          </span>
+                        );
+                      }
+                      return null;
+                    })()}
                   </div>
                   <div className="text-xs text-gray-400 mt-1">
                     涨{marketSentiment?.data.up_count} / 跌{marketSentiment?.data.down_count}
@@ -335,11 +398,11 @@ export default function Dashboard() {
                           <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.amount_change_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.amount_change_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
                             量能{marketSentiment.data.sentiment_score.amount_change_score > 0 ? '+1' : marketSentiment.data.sentiment_score.amount_change_score < 0 ? '-1' : '0'}
                           </span>
-                          <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.limit_up_change_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.limit_up_change_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
-                            涨停{marketSentiment.data.sentiment_score.limit_up_change_score > 0 ? '+1' : marketSentiment.data.sentiment_score.limit_up_change_score < 0 ? '-1' : '0'}
+                          <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.limit_up_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.limit_up_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
+                            涨停{marketSentiment.data.sentiment_score.limit_up_score > 0 ? '+1' : marketSentiment.data.sentiment_score.limit_up_score < 0 ? '-1' : '0'}
                           </span>
-                          <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.limit_down_change_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.limit_down_change_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
-                            跌停{marketSentiment.data.sentiment_score.limit_down_change_score > 0 ? '+1' : marketSentiment.data.sentiment_score.limit_down_change_score < 0 ? '-1' : '0'}
+                          <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.limit_down_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.limit_down_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
+                            跌停{marketSentiment.data.sentiment_score.limit_down_score > 0 ? '+1' : marketSentiment.data.sentiment_score.limit_down_score < 0 ? '-1' : '0'}
                           </span>
                           <span className={`px-1.5 py-0.5 rounded ${marketSentiment.data.sentiment_score.explosion_rate_score > 0 ? 'bg-red-50 text-red-600' : marketSentiment.data.sentiment_score.explosion_rate_score < 0 ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-500'}`}>
                             炸板{marketSentiment.data.sentiment_score.explosion_rate_score > 0 ? '+1' : marketSentiment.data.sentiment_score.explosion_rate_score < 0 ? '-1' : '0'}
@@ -546,7 +609,20 @@ export default function Dashboard() {
                             <tr key={stock.stock_code} className="hover:bg-gray-50">
                               <td className="px-3 py-3 text-sm text-center text-gray-500">{index + 1}</td>
                               <td className="px-3 py-3 text-sm text-gray-600">{stock.stock_code}</td>
-                              <td className="px-3 py-3 text-sm font-medium text-gray-900">{stock.stock_name}</td>
+                              <td className="px-3 py-3 text-sm">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium text-gray-900">{stock.stock_name}</span>
+                                  <button
+                                    onClick={() => handleAddToWatchlist(stock, marketSentiment?.data.trade_date || '')}
+                                    className="w-5 h-5 flex items-center justify-center rounded bg-blue-50 hover:bg-blue-100 text-blue-600 hover:text-blue-700 transition-colors"
+                                    title="添加到自选池"
+                                  >
+                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 4v16m8-8H4" />
+                                    </svg>
+                                  </button>
+                                </div>
+                              </td>
                               <td className="px-3 py-3 text-sm text-right text-red-600 font-medium">
                                 +{stock.change_pct?.toFixed(2)}%
                               </td>
@@ -609,6 +685,13 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+
+      {/* Toast 提示 */}
+      {toastMessage && (
+        <div className="fixed bottom-8 right-8 bg-gray-900 text-white px-6 py-3 rounded-lg shadow-lg animate-fade-in-up z-50">
+          {toastMessage}
+        </div>
+      )}
     </main>
   );
 }

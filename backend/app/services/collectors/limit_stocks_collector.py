@@ -20,7 +20,8 @@ import time
 import os
 
 from app.utils.supabase_client import get_supabase
-from app.utils.trading_date import get_latest_trading_date
+from app.utils.trading_date import get_latest_trading_date, get_previous_trading_date
+from app.services.collectors.ths_concept_collector import ThsConceptCollector
 
 
 class LimitStocksCollector:
@@ -486,6 +487,29 @@ class LimitStocksCollector:
             except Exception as e:
                 logger.warning(f"获取 {record['stock_code']} 资金流向失败: {e}")
 
+        # 补全同花顺概念数据
+        logger.info("开始补全同花顺概念数据...")
+        try:
+            ths_collector = ThsConceptCollector()
+            stock_codes = [r["stock_code"] for r in records]
+            ths_concepts_map = ths_collector.get_stocks_concepts_batch(stock_codes)
+
+            supplement_count = 0
+            for record in records:
+                stock_code = record["stock_code"]
+                ths_concepts = ths_concepts_map.get(stock_code, [])
+
+                if ths_concepts:
+                    # 合并概念（去重）
+                    existing_concepts = record.get("concepts") or []
+                    merged_concepts = list(set(existing_concepts + ths_concepts))
+                    record["concepts"] = merged_concepts
+                    supplement_count += 1
+
+            logger.info(f"✅ 成功为 {supplement_count}/{len(records)} 只股票补全同花顺概念")
+        except Exception as e:
+            logger.warning(f"补全同花顺概念失败: {e}")
+
         logger.info(f"处理涨停股数据完成，共 {len(records)} 条有效记录")
         return records
 
@@ -653,6 +677,190 @@ class LimitStocksCollector:
             logger.error(f"保存涨跌停数据失败: {str(e)}")
             return 0
 
+    def _get_previous_day_limit_up_stocks(self, previous_date: str) -> List[Dict]:
+        """
+        从数据库查询前一交易日涨停的股票列表
+
+        Args:
+            previous_date: 前一交易日期 YYYY-MM-DD
+
+        Returns:
+            股票列表 [{"stock_code": "000001", "stock_name": "平安银行"}, ...]
+        """
+        try:
+            response = self.supabase.table("limit_stocks_detail")\
+                .select("stock_code, stock_name")\
+                .eq("trade_date", previous_date)\
+                .eq("limit_type", "limit_up")\
+                .execute()
+
+            stocks = response.data
+            logger.info(f"查询到 {previous_date} 涨停股票 {len(stocks)} 只")
+            return stocks
+
+        except Exception as e:
+            logger.error(f"查询前一交易日涨停股票失败: {e}")
+            return []
+
+    def _collect_stocks_daily_data(self, stock_codes: List[str], trade_date: str) -> pd.DataFrame:
+        """
+        使用Tushare批量获取股票的日线数据
+
+        Args:
+            stock_codes: 股票代码列表（6位数字）
+            trade_date: 交易日期 YYYY-MM-DD
+
+        Returns:
+            DataFrame 包含所有股票的日线数据
+        """
+        if not self.tushare_pro:
+            logger.warning("Tushare Pro API 未初始化，无法获取日线数据")
+            return pd.DataFrame()
+
+        all_data = []
+        ts_date = trade_date.replace('-', '')  # YYYY-MM-DD -> YYYYMMDD
+
+        logger.info(f"开始获取 {len(stock_codes)} 只股票的 {trade_date} 日线数据...")
+
+        for i, stock_code in enumerate(stock_codes):
+            try:
+                # 转换股票代码格式：XXXXXX -> XXXXXX.SH/SZ
+                if stock_code.startswith(('6', '900')):
+                    ts_code = f"{stock_code}.SH"
+                elif stock_code.startswith(('0', '2', '3')):
+                    ts_code = f"{stock_code}.SZ"
+                elif stock_code.startswith(('8', '4')):
+                    ts_code = f"{stock_code}.BJ"
+                else:
+                    ts_code = f"{stock_code}.SH"
+
+                # 调用Tushare API
+                time.sleep(0.05)  # 避免频率限制
+                df = self.tushare_pro.daily(
+                    ts_code=ts_code,
+                    start_date=ts_date,
+                    end_date=ts_date
+                )
+
+                if df is not None and not df.empty:
+                    all_data.append(df)
+                else:
+                    logger.debug(f"  {stock_code} 无数据（可能停牌）")
+
+                # 每20只股票输出进度
+                if (i + 1) % 20 == 0:
+                    logger.info(f"  已获取 {i + 1}/{len(stock_codes)} 只股票")
+
+            except Exception as e:
+                logger.warning(f"获取 {stock_code} 日线数据失败: {e}")
+                continue
+
+        if all_data:
+            result_df = pd.concat(all_data, ignore_index=True)
+            logger.info(f"✅ 成功获取 {len(result_df)} 只股票的日线数据")
+            return result_df
+        else:
+            logger.warning("未获取到任何日线数据")
+            return pd.DataFrame()
+
+    def _process_daily_data(
+        self,
+        df: pd.DataFrame,
+        trade_date: str,
+        stock_name_map: Dict[str, str]
+    ) -> List[Dict]:
+        """
+        处理日线数据，转换为数据库格式
+
+        Args:
+            df: Tushare日线数据 DataFrame
+            trade_date: 交易日期 YYYY-MM-DD
+            stock_name_map: 股票代码->名称映射 {"000001": "平安银行"}
+
+        Returns:
+            处理后的记录列表
+        """
+        if df.empty:
+            return []
+
+        records = []
+
+        for _, row in df.iterrows():
+            try:
+                # 提取股票代码（去除交易所后缀）
+                ts_code = row['ts_code']
+                stock_code = ts_code.split('.')[0]
+                stock_name = stock_name_map.get(stock_code, "未知")
+
+                # 检查是否为ST股票
+                if "ST" in stock_name.upper():
+                    logger.debug(f"   跳过ST股票: {stock_name}")
+                    continue
+
+                # 涨跌幅
+                change_pct = row['pct_chg']
+
+                # 判断涨跌停类型
+                limit_type = None
+                if change_pct >= 9.9:
+                    limit_type = "limit_up"
+                elif change_pct <= -9.9:
+                    limit_type = "limit_down"
+                else:
+                    limit_type = "normal"  # 正常涨跌
+
+                record = {
+                    "trade_date": trade_date,
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "limit_type": limit_type,
+                    "change_pct": change_pct,
+                    "close_price": row['close'],
+                    "amount": row['amount'] * 1000 if pd.notna(row['amount']) else None,  # 金额单位转换（千元->元）
+                    "turnover_rate": row.get('turnover_rate'),
+                    "market_cap": row.get('total_mv') * 10000 if pd.notna(row.get('total_mv')) else None,  # 万元->元
+                    "circulation_market_cap": row.get('circ_mv') * 10000 if pd.notna(row.get('circ_mv')) else None,
+                }
+
+                records.append(record)
+
+            except Exception as e:
+                logger.warning(f"处理日线数据失败: {e}, row: {row.to_dict()}")
+                continue
+
+        # 批量获取资金流向数据
+        logger.info(f"开始获取 {len(records)} 只股票的资金流向数据...")
+        for i, record in enumerate(records):
+            try:
+                fund_flow = self.get_fund_flow_data(record["stock_code"], trade_date)
+                record.update(fund_flow)
+                if (i + 1) % 10 == 0:
+                    logger.info(f"已获取 {i + 1}/{len(records)} 只股票的资金流向")
+                    time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"获取 {record['stock_code']} 资金流向失败: {e}")
+
+        # 补全同花顺概念数据
+        logger.info("开始补全同花顺概念数据...")
+        try:
+            ths_collector = ThsConceptCollector()
+            stock_codes = [r["stock_code"] for r in records]
+            ths_concepts_map = ths_collector.get_stocks_concepts_batch(stock_codes)
+
+            for record in records:
+                stock_code = record["stock_code"]
+                concepts = ths_concepts_map.get(stock_code, [])
+                record["concepts"] = concepts[:5]  # 最多保存5个概念
+
+        except Exception as e:
+            logger.warning(f"补全同花顺概念失败: {e}")
+            # 如果失败，给所有记录设置空概念
+            for record in records:
+                record["concepts"] = []
+
+        logger.info(f"处理日线数据完成，共 {len(records)} 条有效记录")
+        return records
+
     def collect_and_save(self, trade_date: Optional[str] = None) -> Dict[str, int]:
         """
         采集并保存涨跌停股池数据
@@ -661,7 +869,7 @@ class LimitStocksCollector:
             trade_date: 交易日期 YYYY-MM-DD，默认为最近交易日
 
         Returns:
-            {"limit_up": count, "limit_down": count}
+            {"limit_up": count, "limit_down": count, "yesterday_limit_performance": count}
         """
         if not trade_date:
             trade_date = get_latest_trading_date()  # 使用最近交易日而不是系统当前日期
@@ -670,7 +878,7 @@ class LimitStocksCollector:
 
         logger.info(f"开始采集 {trade_date} 涨跌停股池数据...")
 
-        results = {"limit_up": 0, "limit_down": 0}
+        results = {"limit_up": 0, "limit_down": 0, "yesterday_limit_performance": 0}
 
         # 1. 采集并处理涨停股池
         limit_up_df = self.collect_limit_up_stocks(date_akshare)
@@ -684,7 +892,64 @@ class LimitStocksCollector:
             limit_down_records = self.process_limit_down_data(limit_down_df, trade_date)
             results["limit_down"] = self.save_to_database(limit_down_records)
 
-        logger.info(f"涨跌停数据采集完成: 涨停{results['limit_up']}只, 跌停{results['limit_down']}只")
+        # 3. 【新增】采集前一交易日涨停股票的今日表现
+        logger.info(f"开始采集前一交易日涨停股票的今日表现...")
+        previous_date = get_previous_trading_date(trade_date)
+
+        if previous_date:
+            logger.info(f"前一交易日: {previous_date}")
+
+            # 3.1 查询前一交易日涨停的股票列表
+            yesterday_stocks = self._get_previous_day_limit_up_stocks(previous_date)
+
+            if yesterday_stocks:
+                # 3.2 获取这些股票今日的日线数据
+                stock_codes = [s["stock_code"] for s in yesterday_stocks]
+                stock_name_map = {s["stock_code"]: s["stock_name"] for s in yesterday_stocks}
+
+                daily_df = self._collect_stocks_daily_data(stock_codes, trade_date)
+
+                # 3.3 处理并保存数据
+                if not daily_df.empty:
+                    performance_records = self._process_daily_data(daily_df, trade_date, stock_name_map)
+
+                    # 过滤掉已经在今日涨停/跌停池中的股票（避免重复）
+                    existing_codes = set()
+                    if not limit_up_df.empty:
+                        if 'ts_code' in limit_up_df.columns:
+                            existing_codes.update(limit_up_df['ts_code'].str.split('.').str[0].tolist())
+                        elif '代码' in limit_up_df.columns:
+                            existing_codes.update(limit_up_df['代码'].tolist())
+                    if not limit_down_df.empty:
+                        if 'ts_code' in limit_down_df.columns:
+                            existing_codes.update(limit_down_df['ts_code'].str.split('.').str[0].tolist())
+                        elif '代码' in limit_down_df.columns:
+                            existing_codes.update(limit_down_df['代码'].tolist())
+
+                    # 只保存不在今日涨停/跌停池中的股票
+                    filtered_records = [
+                        r for r in performance_records
+                        if r["stock_code"] not in existing_codes
+                    ]
+
+                    if filtered_records:
+                        results["yesterday_limit_performance"] = self.save_to_database(filtered_records)
+                        logger.info(f"✅ 保存前一交易日涨停股票今日表现: {results['yesterday_limit_performance']} 只")
+                    else:
+                        logger.info("所有前一交易日涨停股票今日均已涨停/跌停，无需额外保存")
+                else:
+                    logger.warning("未获取到前一交易日涨停股票的今日数据")
+            else:
+                logger.info(f"{previous_date} 无涨停股票数据")
+        else:
+            logger.warning("无法获取前一交易日，跳过前一交易日涨停股票表现采集")
+
+        logger.info(
+            f"数据采集完成: "
+            f"涨停{results['limit_up']}只, "
+            f"跌停{results['limit_down']}只, "
+            f"昨日涨停今日表现{results['yesterday_limit_performance']}只"
+        )
 
         return results
 

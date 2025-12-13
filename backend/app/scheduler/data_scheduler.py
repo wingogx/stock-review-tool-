@@ -34,6 +34,10 @@ from app.services.collectors.market_index_collector import MarketIndexCollector
 from app.services.collectors.limit_stocks_collector import LimitStocksCollector
 from app.services.collectors.market_sentiment_collector import MarketSentimentCollector
 from app.services.collectors.hot_concepts_collector import HotConceptsCollector
+from app.services.collectors.yesterday_limit_collector import YesterdayLimitCollector
+from app.services.backtest_service import BacktestService
+from app.utils.trading_date import get_latest_trading_date, get_previous_trading_date
+import asyncio
 
 
 def collect_market_index():
@@ -110,6 +114,57 @@ def collect_hot_concepts():
         return False
 
 
+def collect_yesterday_limit():
+    """采集昨日涨停表现数据（用于情绪分析的溢价率、大面率等）"""
+    try:
+        logger.info("=" * 60)
+        logger.info("开始采集昨日涨停表现数据...")
+
+        collector = YesterdayLimitCollector()
+        result = collector.collect()
+
+        logger.info(f"昨日涨停表现采集完成: {result.get('saved', 0)} 条记录")
+
+        return True
+    except Exception as e:
+        logger.error(f"昨日涨停表现采集失败: {str(e)}")
+        return False
+
+
+def save_backtest_data():
+    """保存昨日涨停股的回测数据（评分 vs 今日实际表现）"""
+    try:
+        logger.info("=" * 60)
+        logger.info("开始保存回测数据...")
+
+        # 获取昨日交易日期
+        today = get_latest_trading_date()
+        yesterday = get_previous_trading_date(today)
+
+        if not yesterday:
+            logger.warning("无法获取昨日交易日期")
+            return False
+
+        logger.info(f"回测日期: {yesterday} (评分日) -> {today} (实际表现)")
+
+        # 调用异步函数保存回测数据
+        service = BacktestService()
+        result = asyncio.run(service.batch_save_backtest(
+            trade_date=yesterday,
+            next_trade_date=today,
+            limit=100  # 最多处理100只股票
+        ))
+
+        logger.info(f"回测数据保存完成: 成功 {result['success']}/{result['total']} 只")
+
+        return result['success'] > 0
+    except Exception as e:
+        logger.error(f"回测数据保存失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def run_daily_collection():
     """每日数据采集主任务"""
     logger.info("\n" + "=" * 80)
@@ -121,6 +176,8 @@ def run_daily_collection():
         "limit_stocks": False,
         "market_sentiment": False,
         "hot_concepts": False,
+        "yesterday_limit": False,
+        "backtest_data": False,  # 新增：回测数据保存
     }
 
     # 1. 采集大盘指数
@@ -134,6 +191,12 @@ def run_daily_collection():
 
     # 4. 采集热门概念
     results["hot_concepts"] = collect_hot_concepts()
+
+    # 5. 采集昨日涨停表现（情绪分析用）
+    results["yesterday_limit"] = collect_yesterday_limit()
+
+    # 6. 保存回测数据（昨日评分 vs 今日表现）
+    results["backtest_data"] = save_backtest_data()
 
     # 汇总结果
     logger.info("\n" + "=" * 80)
@@ -159,18 +222,18 @@ def main():
     logger.info("📅 数据采集定时任务调度器启动")
     logger.info("=" * 80)
     logger.info("调度规则:")
-    logger.info("  - 每个交易日 16:00 执行数据采集")
+    logger.info("  - 每个交易日 18:00 执行数据采集")
     logger.info("  - 交易日: 周一至周五")
     logger.info("=" * 80)
 
     scheduler = BlockingScheduler()
 
-    # 添加定时任务: 每个交易日16:00执行
+    # 添加定时任务: 每个交易日18:00执行
     scheduler.add_job(
         run_daily_collection,
         trigger=CronTrigger(
             day_of_week='mon-fri',  # 周一到周五
-            hour=16,                 # 16点
+            hour=18,                 # 18点
             minute=0                 # 0分
         ),
         id='daily_collection',

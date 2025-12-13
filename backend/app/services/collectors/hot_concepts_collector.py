@@ -18,6 +18,7 @@
 import akshare as ak
 import pandas as pd
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Tuple, Set
@@ -399,31 +400,56 @@ class HotConceptsCollector:
                 if len(code_data) < 5:
                     concepts_need_补充.append(ts_code)
 
-            # 步骤3: 对数据不足的概念单独查询
+            # 步骤3: 对数据不足的概念单独查询（带限速重试机制）
             if concepts_need_补充:
                 logger.info(f"   发现 {len(concepts_need_补充)} 个概念数据不足5天，开始单独查询...")
                 补充_count = 0
+                max_retries = 3  # 最大重试次数
 
                 for ts_code in concepts_need_补充:
-                    try:
-                        time.sleep(0.1)  # 避免频率限制
-                        single_df = self.tushare_pro.ths_daily(
-                            ts_code=ts_code,
-                            start_date=start_date,
-                            end_date=end_date
-                        )
+                    retry_count = 0
+                    success = False
 
-                        if single_df is not None and not single_df.empty:
-                            # 移除该概念的旧数据
-                            history_df = history_df[history_df['ts_code'] != ts_code]
-                            # 添加新数据
-                            history_df = pd.concat([history_df, single_df], ignore_index=True)
-                            补充_count += 1
+                    while not success and retry_count <= max_retries:
+                        try:
+                            time.sleep(0.1)  # 避免频率限制
+                            single_df = self.tushare_pro.ths_daily(
+                                ts_code=ts_code,
+                                start_date=start_date,
+                                end_date=end_date
+                            )
 
-                            if 补充_count <= 3:  # 只打印前3个
-                                logger.debug(f"      {ts_code}: 补充成功，现有{len(single_df)}天数据")
-                    except Exception as e:
-                        logger.debug(f"      {ts_code}: 补充失败 - {e}")
+                            if single_df is not None and not single_df.empty:
+                                # 移除该概念的旧数据
+                                history_df = history_df[history_df['ts_code'] != ts_code]
+                                # 添加新数据
+                                history_df = pd.concat([history_df, single_df], ignore_index=True)
+                                补充_count += 1
+                                success = True
+
+                                if 补充_count <= 3:  # 只打印前3个
+                                    logger.debug(f"      {ts_code}: 补充成功，现有{len(single_df)}天数据")
+                            else:
+                                success = True  # 空数据也算成功，不需要重试
+
+                        except Exception as e:
+                            error_msg = str(e)
+                            # 检测限速错误并提取等待时间
+                            if "频繁" in error_msg or "限制" in error_msg:
+                                # 解析等待时间（格式如 "XX秒后可用"）
+                                wait_match = re.search(r'(\d+)秒后可用', error_msg)
+                                wait_time = int(wait_match.group(1)) + 2 if wait_match else 25  # 默认等待25秒
+
+                                retry_count += 1
+                                if retry_count <= max_retries:
+                                    logger.warning(f"      {ts_code}: 被限速，等待{wait_time}秒后重试 ({retry_count}/{max_retries})...")
+                                    time.sleep(wait_time)
+                                else:
+                                    logger.error(f"      {ts_code}: 重试{max_retries}次后仍失败，跳过")
+                            else:
+                                # 非限速错误，直接跳过
+                                logger.debug(f"      {ts_code}: 补充失败 - {e}")
+                                break
 
                 if 补充_count > 0:
                     logger.info(f"   ✅ 成功补充 {补充_count}/{len(concepts_need_补充)} 个概念的历史数据")
@@ -962,8 +988,9 @@ class HotConceptsCollector:
 
         逻辑：
         1. 查询最近一次上榜日期
-        2. 如果距离当前日期<=3天，认为是连续的，继承上次的consecutive_days并+1
-        3. 如果>3天或没有历史记录，返回1（首次上榜）
+        2. 检查两次上榜之间是否有其他交易日的数据（利用数据库只有交易日有数据的特点）
+        3. 如果中间没有其他交易日，则认为是连续的，继承上次的consecutive_days并+1
+        4. 如果中间有其他交易日（说明那些交易日该概念没上榜），则不算连续，返回1
 
         Args:
             concept_name: 概念名称
@@ -974,8 +1001,7 @@ class HotConceptsCollector:
             连续上榜次数（包括今天）
         """
         try:
-            # 关键修改：查询历史数据时使用 lt (小于) 而不是 lte (小于等于)
-            # 因为当前日期的数据还没有保存到数据库
+            # 1. 查询该概念最近一次上榜的记录
             response = self.supabase.table("hot_concepts")\
                 .select("trade_date, consecutive_days")\
                 .eq("concept_name", concept_name)\
@@ -988,20 +1014,29 @@ class HotConceptsCollector:
                 # 没有历史记录，今天是第一次上榜
                 return 1
 
-            # 获取最近一次上榜的记录
             last_record = response.data[0]
-            last_date = datetime.strptime(last_record['trade_date'], "%Y-%m-%d")
-            current_date_obj = datetime.strptime(current_date, "%Y-%m-%d")
-            days_diff = (current_date_obj - last_date).days
+            last_date_str = last_record['trade_date']
 
-            # 如果距离上一次上榜不超过3天（考虑周末），则认为是连续的
-            if days_diff <= 3:
-                # 继承上次的连续天数并+1
-                last_consecutive = last_record.get('consecutive_days', 1)
-                return last_consecutive + 1
-            else:
-                # 中断了，重新开始计数
+            # 2. 检查两次上榜之间是否有其他交易日
+            # 利用数据库特点：只有交易日才有数据，周末/节假日没有数据
+            # 查询 hot_concepts 表中介于 last_date 和 current_date 之间的所有不同交易日
+            between_response = self.supabase.table("hot_concepts")\
+                .select("trade_date")\
+                .gt("trade_date", last_date_str)\
+                .lt("trade_date", current_date)\
+                .limit(1)\
+                .execute()
+
+            # 如果中间存在其他交易日的数据，说明有交易日该概念没有上榜
+            if between_response.data:
+                # 中间有其他交易日，不算连续
+                logger.debug(f"   {concept_name}: 上次上榜{last_date_str}，中间有其他交易日，重新计数")
                 return 1
+
+            # 3. 中间没有其他交易日，说明是连续的交易日上榜
+            # 继承上次的连续天数并+1
+            last_consecutive = last_record.get('consecutive_days', 1)
+            return last_consecutive + 1
 
         except Exception as e:
             logger.debug(f"计算连续上榜次数失败: {concept_name}, {e}")
@@ -1043,17 +1078,85 @@ class HotConceptsCollector:
 
     def collect_and_save(self, trade_date: Optional[str] = None, top_n: int = 10) -> int:
         """
-        采集并保存热门概念数据
+        采集并保存热门概念数据（含异动板块）
+
+        采集逻辑：
+        1. 获取所有概念板块数据
+        2. 计算涨停数和龙头股
+        3. 按5日涨幅排序，取前10作为热门概念 (is_anomaly=False)
+        4. 从TOP10之外找异动板块：
+           - 涨停数前2名 (is_anomaly=True, anomaly_type='limit_up')
+           - 当日涨幅前2名 (is_anomaly=True, anomaly_type='change_pct')
+        5. 去重合并后保存（最多14条）
 
         Args:
             trade_date: 交易日期 YYYY-MM-DD
-            top_n: 保存前N个热门概念（默认10个，按5日涨幅排序）
+            top_n: 热门概念数量（默认10个）
 
         Returns:
             成功保存的记录数
         """
-        hot_concepts = self.collect_hot_concepts(trade_date, top_n)
-        return self.save_to_database(hot_concepts)
+        # 1. 获取所有概念数据（获取全部概念，用于正确计算异动）
+        # 注意：Tushare有约409个概念板块，设置500确保全部获取
+        all_concepts = self.collect_hot_concepts(trade_date, top_n=500)
+
+        if not all_concepts:
+            logger.warning("没有采集到概念数据")
+            return 0
+
+        # 2. 按5日涨幅排序，取前10作为热门概念
+        all_concepts_sorted = sorted(all_concepts, key=lambda x: x.get('change_pct', 0), reverse=True)
+        hot_concepts = all_concepts_sorted[:top_n]
+
+        # 设置热门概念的rank和异动标记
+        for rank, concept in enumerate(hot_concepts, 1):
+            concept['rank'] = rank
+            concept['is_anomaly'] = False
+            concept['anomaly_type'] = None
+
+        # 3. 获取TOP10的概念名称集合
+        top_n_names = {c['concept_name'] for c in hot_concepts}
+
+        # 4. 找异动板块（先取全局前2，再排除已在TOP10的）
+        anomaly_concepts = []
+
+        # 4.1 涨停数>10的概念板块（异动类型：limit_up）
+        # 从所有概念中取涨停数>10的，排除TOP10中的
+        LIMIT_UP_ANOMALY_THRESHOLD = 10  # 涨停数异动阈值
+        limit_up_filtered = [c for c in all_concepts_sorted if (c.get('limit_up_count', 0) or 0) > LIMIT_UP_ANOMALY_THRESHOLD]
+        limit_up_sorted = sorted(limit_up_filtered, key=lambda x: x.get('limit_up_count', 0) or 0, reverse=True)
+        for concept in limit_up_sorted:
+            # 只有不在TOP10中的才算异动
+            if concept['concept_name'] not in top_n_names:
+                concept_copy = concept.copy()
+                concept_copy['is_anomaly'] = True
+                concept_copy['anomaly_type'] = 'limit_up'
+                concept_copy['rank'] = top_n + len(anomaly_concepts) + 1
+                anomaly_concepts.append(concept_copy)
+
+        # 4.2 当日涨幅前2名（异动类型：change_pct）
+        # 先从所有概念中取涨幅前2，再判断是否在TOP10，排除已添加的
+        added_names = {c['concept_name'] for c in anomaly_concepts}
+        change_pct_sorted = sorted(all_concepts_sorted, key=lambda x: x.get('day_change_pct', 0) or 0, reverse=True)
+        for concept in change_pct_sorted[:2]:
+            # 只有不在TOP10中且未添加过的才算异动
+            if concept['concept_name'] not in top_n_names and concept['concept_name'] not in added_names:
+                concept_copy = concept.copy()
+                concept_copy['is_anomaly'] = True
+                concept_copy['anomaly_type'] = 'change_pct'
+                concept_copy['rank'] = top_n + len(anomaly_concepts) + 1
+                anomaly_concepts.append(concept_copy)
+
+        # 5. 合并热门概念和异动板块
+        final_concepts = hot_concepts + anomaly_concepts
+
+        logger.info(f"📊 最终数据: {len(hot_concepts)} 个热门概念 + {len(anomaly_concepts)} 个异动板块")
+        if anomaly_concepts:
+            logger.info("   异动板块:")
+            for c in anomaly_concepts:
+                logger.info(f"      [{c['anomaly_type']}] {c['concept_name']}: 涨停{c.get('limit_up_count', 0)}只, 涨幅{c.get('day_change_pct', 0):.2f}%")
+
+        return self.save_to_database(final_concepts)
 
 
 # 便捷函数
